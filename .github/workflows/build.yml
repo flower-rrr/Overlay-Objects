@@ -49,8 +49,8 @@ jobs:
                   applicationId "com.example.balloverlay"
                   minSdk 24
                   targetSdk 34
-                  versionCode 6
-                  versionName "6.0"
+                  versionCode 7
+                  versionName "7.0"
               }
               signingConfigs {
                   release {
@@ -112,14 +112,13 @@ jobs:
           </manifest>
           EOF
 
-          # Accessibility Service 設定檔
           mkdir -p app/src/main/res/xml
           cat > app/src/main/res/xml/accessibility_service_config.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:accessibilityEventTypes="typeAllMask"
               android:accessibilityFeedbackType="feedbackGeneric"
-              android:accessibilityFlags="flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows"
+              android:accessibilityFlags="flagRetrieveInteractiveWindows"
               android:canRetrieveWindowContent="false"
               android:description="@string/accessibility_description"
               android:notificationTimeout="0"
@@ -185,7 +184,6 @@ jobs:
           }
           JEOF
 
-          # BallOverlayView：繪製球，使用 Accessibility Service 的 Window
           cat > app/src/main/java/com/example/balloverlay/BallOverlayView.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
@@ -193,7 +191,6 @@ jobs:
           import android.graphics.*;
           import android.os.Handler;
           import android.os.Looper;
-          import android.view.MotionEvent;
           import android.view.View;
           import java.util.*;
           @SuppressLint("ViewConstructor")
@@ -202,8 +199,6 @@ jobs:
               private final PhysicsEngine physics;
               private final Handler handler = new Handler(Looper.getMainLooper());
               private long lastTime = System.nanoTime();
-              private Ball dragging = null;
-              private static final float FORCE = 40f;
               private final Runnable loop = new Runnable() {
                   @Override public void run() {
                       long now=System.nanoTime(); float dt=Math.min((now-lastTime)/1e9f,0.05f); lastTime=now;
@@ -216,15 +211,15 @@ jobs:
               public void addBall(float x, float y, float r) { balls.add(new Ball(x,y,r)); }
               public void clearBalls() { balls.clear(); }
               public void destroy() { handler.removeCallbacks(loop); }
-              private int lighten(int c) {
-                  return Color.rgb(Math.min(255,Color.red(c)+80),Math.min(255,Color.green(c)+80),Math.min(255,Color.blue(c)+80));
-              }
               public Ball findBall(float x, float y) {
                   for (int i=balls.size()-1;i>=0;i--) {
                       Ball b=balls.get(i); float dx=x-b.x,dy=y-b.y;
                       if (dx*dx+dy*dy<=b.radius*b.radius) return b;
                   }
                   return null;
+              }
+              private int lighten(int c) {
+                  return Color.rgb(Math.min(255,Color.red(c)+80),Math.min(255,Color.green(c)+80),Math.min(255,Color.blue(c)+80));
               }
               @Override protected void onDraw(Canvas canvas) {
                   Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -237,46 +232,32 @@ jobs:
                       canvas.drawCircle(b.x-b.radius*.3f,b.y-b.radius*.3f,b.radius*.25f,p);
                   }
               }
-              // Accessibility Service 直接呼叫這些方法傳入觸控
-              public boolean handleDown(float x, float y) {
-                  dragging=findBall(x,y);
-                  if (dragging!=null) { dragging.isDragging=true; dragging.dragLastX=x; dragging.dragLastY=y; return true; }
-                  return false;
-              }
-              public void handleMove(float x, float y) {
-                  if (dragging!=null) {
-                      float ddx=x-dragging.dragLastX, ddy=y-dragging.dragLastY;
-                      dragging.vx+=ddx*FORCE; dragging.vy+=ddy*FORCE;
-                      dragging.x=x; dragging.y=y;
-                      dragging.dragLastX=x; dragging.dragLastY=y;
-                  }
-              }
-              public void handleUp() {
-                  if (dragging!=null) { dragging.isDragging=false; dragging=null; }
-              }
           }
           JEOF
 
-          # BallAccessibilityService：核心服務
-          # 使用 Accessibility 的 Window 顯示球（完全不攔截觸控）
-          # 用 onAccessibilityEvent 的觸控手勢偵測球的互動
           cat > app/src/main/java/com/example/balloverlay/BallAccessibilityService.java << 'JEOF'
           package com.example.balloverlay;
           import android.accessibilityservice.AccessibilityService;
-          import android.accessibilityservice.AccessibilityServiceInfo;
           import android.graphics.PixelFormat;
           import android.os.Build;
-          import android.view.WindowManager;
-          import android.view.accessibility.AccessibilityEvent;
+          import android.os.Handler;
+          import android.os.Looper;
           import android.util.DisplayMetrics;
           import android.view.MotionEvent;
+          import android.view.WindowManager;
+          import android.view.accessibility.AccessibilityEvent;
 
           public class BallAccessibilityService extends AccessibilityService {
               private static BallAccessibilityService instance;
               private WindowManager wm;
               private BallOverlayView ballView;
+              private WindowManager.LayoutParams params;
               private boolean viewAdded = false;
+              private boolean isTouchable = false;
               private int screenW, screenH;
+              private Ball dragging = null;
+              private static final float FORCE = 40f;
+              private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
               public static BallAccessibilityService getInstance() { return instance; }
 
@@ -288,70 +269,88 @@ jobs:
                   wm.getDefaultDisplay().getRealMetrics(dm);
                   screenW = dm.widthPixels; screenH = dm.heightPixels;
                   ballView = new BallOverlayView(this, screenW, screenH);
-
-                  // 設定接收觸控手勢
-                  AccessibilityServiceInfo info = getServiceInfo();
-                  if (info != null) {
-                      info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE;
-                      setServiceInfo(info);
-                  }
               }
 
-              private WindowManager.LayoutParams makeParams() {
+              private WindowManager.LayoutParams makeParams(boolean touchable) {
                   int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                       ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
                       : WindowManager.LayoutParams.TYPE_PHONE;
+                  int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                      | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                      | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
+                  if (!touchable) flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
                   return new WindowManager.LayoutParams(
                       WindowManager.LayoutParams.MATCH_PARENT,
                       WindowManager.LayoutParams.MATCH_PARENT,
-                      type,
-                      // 關鍵：FLAG_NOT_TOUCHABLE 讓觸控完全穿透
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                      | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                      | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                      | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                      PixelFormat.TRANSLUCENT);
+                      type, flags, PixelFormat.TRANSLUCENT);
+              }
+
+              // 設定 Window 是否可觸控（在主執行緒執行）
+              private void setTouchable(boolean touchable) {
+                  if (!viewAdded || isTouchable == touchable) return;
+                  isTouchable = touchable;
+                  mainHandler.post(() -> {
+                      if (!viewAdded) return;
+                      params = makeParams(touchable);
+                      wm.updateViewLayout(ballView, params);
+                  });
+              }
+
+              // onMotionEvent 在非主執行緒呼叫，且不攔截事件
+              // 用它來偵測手指位置，決定是否讓 Window 可觸控
+              @Override public void onMotionEvent(MotionEvent event) {
+                  if (ballView == null || !viewAdded) return;
+                  float x = event.getRawX(), y = event.getRawY();
+                  int action = event.getAction();
+
+                  if (action == MotionEvent.ACTION_DOWN) {
+                      Ball hit = ballView.findBall(x, y);
+                      if (hit != null) {
+                          // 命中球：切換成可觸控讓球 View 接收後續事件
+                          dragging = hit;
+                          dragging.isDragging = true;
+                          dragging.dragLastX = x; dragging.dragLastY = y;
+                          setTouchable(true);
+                      }
+                  } else if (action == MotionEvent.ACTION_MOVE && dragging != null) {
+                      float ddx = x - dragging.dragLastX, ddy = y - dragging.dragLastY;
+                      dragging.vx += ddx * FORCE; dragging.vy += ddy * FORCE;
+                      dragging.x = x; dragging.y = y;
+                      dragging.dragLastX = x; dragging.dragLastY = y;
+                  } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                      if (dragging != null) { dragging.isDragging = false; dragging = null; }
+                      setTouchable(false);
+                  }
               }
 
               public void addBall(float x, float y, float r) {
                   if (ballView == null) return;
-                  if (!viewAdded) { wm.addView(ballView, makeParams()); viewAdded = true; }
-                  ballView.addBall(x, y, r);
+                  mainHandler.post(() -> {
+                      if (!viewAdded) {
+                          params = makeParams(false); // 預設不可觸控
+                          isTouchable = false;
+                          wm.addView(ballView, params);
+                          viewAdded = true;
+                      }
+                      ballView.addBall(x, y, r);
+                  });
               }
 
               public void clearBalls() {
-                  if (ballView != null) ballView.clearBalls();
-                  if (viewAdded) { wm.removeView(ballView); viewAdded = false; }
+                  mainHandler.post(() -> {
+                      if (ballView != null) ballView.clearBalls();
+                      if (viewAdded) { wm.removeView(ballView); viewAdded = false; }
+                  });
               }
 
-              // Accessibility Service 可以接收觸控事件而不攔截它們
-              @Override protected boolean onKeyEvent(android.view.KeyEvent event) { return false; }
-
-              @Override public boolean onGesture(int gestureId) { return false; }
-
-              @Override public void onMotionEvent(MotionEvent event) {
-                  if (ballView == null || !viewAdded) return;
-                  float x = event.getX(), y = event.getY();
-                  switch (event.getAction()) {
-                      case MotionEvent.ACTION_DOWN:
-                          ballView.handleDown(x, y);
-                          break;
-                      case MotionEvent.ACTION_MOVE:
-                          ballView.handleMove(x, y);
-                          break;
-                      case MotionEvent.ACTION_UP:
-                      case MotionEvent.ACTION_CANCEL:
-                          ballView.handleUp();
-                          break;
-                  }
-              }
-
-              @Override public void onAccessibilityEvent(AccessibilityEvent event) {}
+              @Override public void onAccessibilityEvent(AccessibilityEvent e) {}
               @Override public void onInterrupt() {}
-
               @Override public void onDestroy() {
                   super.onDestroy();
-                  if (ballView != null) { ballView.destroy(); if (viewAdded) wm.removeView(ballView); }
+                  if (ballView != null) {
+                      ballView.destroy();
+                      if (viewAdded) mainHandler.post(() -> wm.removeView(ballView));
+                  }
                   instance = null;
               }
           }
@@ -428,7 +427,7 @@ jobs:
                   findViewById(R.id.btnClear).setOnClickListener(v -> onClear());
               }
               private void onSummon() {
-                  if (!isAccessibilityEnabled()) {
+                  if (BallAccessibilityService.getInstance() == null) {
                       Toast.makeText(this,"請先在無障礙設定中開啟「球體召喚器」",Toast.LENGTH_LONG).show();
                       startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
                       return;
@@ -440,9 +439,6 @@ jobs:
                   BallAccessibilityService svc=BallAccessibilityService.getInstance();
                   if(svc!=null) { svc.clearBalls(); Toast.makeText(this,"已刪除所有物體",Toast.LENGTH_SHORT).show(); }
                   else Toast.makeText(this,"請先開啟無障礙服務",Toast.LENGTH_SHORT).show();
-              }
-              private boolean isAccessibilityEnabled() {
-                  return BallAccessibilityService.getInstance() != null;
               }
           }
           JEOF
@@ -458,12 +454,11 @@ jobs:
                   android:textSize="28sp" android:textStyle="bold" android:layout_marginBottom="8dp"/>
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
                   android:text="首次使用：請開啟無障礙服務" android:textColor="#FFB300"
-                  android:textSize="14sp" android:layout_marginBottom="8dp"/>
+                  android:textSize="14sp" android:layout_marginBottom="6dp"/>
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
                   android:text="設定 → 無障礙 → 已下載應用程式 → 球體召喚器 → 開啟"
-                  android:textColor="#90A4AE" android:textSize="12sp"
-                  android:gravity="center" android:layout_marginBottom="40dp"
-                  android:paddingLeft="24dp" android:paddingRight="24dp"/>
+                  android:textColor="#90A4AE" android:textSize="12sp" android:gravity="center"
+                  android:paddingLeft="24dp" android:paddingRight="24dp" android:layout_marginBottom="40dp"/>
               <Button android:id="@+id/btnSummon"
                   android:layout_width="260dp" android:layout_height="64dp"
                   android:text="召喚球" android:textSize="18sp" android:textColor="#FFFFFF"
