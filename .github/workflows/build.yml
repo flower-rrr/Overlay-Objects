@@ -49,8 +49,8 @@ jobs:
                   applicationId "com.example.balloverlay"
                   minSdk 24
                   targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
+                  versionCode 2
+                  versionName "2.0"
               }
               signingConfigs {
                   release {
@@ -99,6 +99,10 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
+                  <activity
+                      android:name=".SummonOverlayActivity"
+                      android:theme="@style/Theme.BallOverlay.Transparent"
+                      android:exported="false"/>
                   <service
                       android:name=".OverlayService"
                       android:exported="false"
@@ -109,20 +113,15 @@ jobs:
 
           mkdir -p app/src/main/java/com/example/balloverlay
 
-          # ── Ball.java ──
           cat > app/src/main/java/com/example/balloverlay/Ball.java << 'JEOF'
           package com.example.balloverlay;
           import android.graphics.Color;
           import java.util.Random;
           public class Ball {
-              public float x, y;       // 圓心位置
-              public float vx, vy;     // 速度
-              public float radius;
+              public float x, y, vx, vy, radius;
               public int color;
               public boolean isDragging = false;
               public float dragLastX, dragLastY;
-              public float dragVx, dragVy; // 拖曳速度
-
               private static final Random RND = new Random();
               private static final int[] COLORS = {
                   Color.parseColor("#F44336"), Color.parseColor("#2196F3"),
@@ -130,64 +129,53 @@ jobs:
                   Color.parseColor("#9C27B0"), Color.parseColor("#00BCD4"),
                   Color.parseColor("#FFEB3B"), Color.parseColor("#FF4081"),
               };
-
               public Ball(float x, float y, float radius) {
-                  this.x = x; this.y = y; this.radius = radius;
-                  this.vx = 0; this.vy = 0;
-                  this.color = COLORS[RND.nextInt(COLORS.length)];
+                  this.x=x; this.y=y; this.radius=radius;
+                  this.vx=0; this.vy=0;
+                  this.color=COLORS[RND.nextInt(COLORS.length)];
               }
           }
           JEOF
 
-          # ── PhysicsEngine.java ──
           cat > app/src/main/java/com/example/balloverlay/PhysicsEngine.java << 'JEOF'
           package com.example.balloverlay;
           import java.util.List;
           public class PhysicsEngine {
-              private static final float GRAVITY   = 1200f; // px/s²
-              private static final float DAMPING   = 0.65f; // 碰牆反彈衰減
-              private static final float FRICTION  = 0.98f; // 每幀速度保留率
-              private static final float SLEEP_VEL = 5f;    // 速度低於此值且在地面視為靜止
-
+              private static final float GRAVITY  = 1200f;
+              private static final float DAMPING  = 0.65f;
+              private static final float FRICTION = 0.98f;
+              private static final float SLEEP_VEL = 5f;
               private int screenW, screenH;
-
-              public PhysicsEngine(int w, int h) { screenW = w; screenH = h; }
-              public void setScreen(int w, int h) { screenW = w; screenH = h; }
-
+              public PhysicsEngine(int w, int h) { screenW=w; screenH=h; }
+              public void setScreen(int w, int h) { screenW=w; screenH=h; }
               public void step(List<Ball> balls, float dt) {
                   for (Ball b : balls) {
                       if (b.isDragging) continue;
-                      // 重力
                       b.vy += GRAVITY * dt;
-                      // 摩擦
                       b.vx *= FRICTION;
-                      // 移動
                       b.x += b.vx * dt;
                       b.y += b.vy * dt;
-                      // 邊緣碰撞
-                      if (b.x - b.radius < 0) { b.x = b.radius; b.vx = Math.abs(b.vx) * DAMPING; }
-                      if (b.x + b.radius > screenW) { b.x = screenW - b.radius; b.vx = -Math.abs(b.vx) * DAMPING; }
-                      if (b.y - b.radius < 0) { b.y = b.radius; b.vy = Math.abs(b.vy) * DAMPING; }
-                      if (b.y + b.radius > screenH) {
+                      if (b.x - b.radius < 0)         { b.x = b.radius;          b.vx =  Math.abs(b.vx)*DAMPING; }
+                      if (b.x + b.radius > screenW)   { b.x = screenW-b.radius;  b.vx = -Math.abs(b.vx)*DAMPING; }
+                      if (b.y - b.radius < 0)         { b.y = b.radius;          b.vy =  Math.abs(b.vy)*DAMPING; }
+                      if (b.y + b.radius > screenH)   {
                           b.y = screenH - b.radius;
-                          b.vy = -Math.abs(b.vy) * DAMPING;
-                          // 地板靜止摩擦
-                          if (Math.abs(b.vy) < SLEEP_VEL) { b.vy = 0; b.vx *= 0.85f; }
+                          b.vy = -Math.abs(b.vy)*DAMPING;
+                          if (Math.abs(b.vy) < SLEEP_VEL) { b.vy=0; b.vx*=0.85f; }
                       }
                   }
-                  // 球與球碰撞（不彈開，只推開重疊）
-                  for (int i = 0; i < balls.size(); i++) {
-                      for (int j = i+1; j < balls.size(); j++) {
-                          Ball a = balls.get(i), b2 = balls.get(j);
-                          float dx = b2.x - a.x, dy = b2.y - a.y;
-                          float dist = (float) Math.sqrt(dx*dx + dy*dy);
-                          float minDist = a.radius + b2.radius;
-                          if (dist < minDist && dist > 0.01f) {
-                              // 推開重疊，不傳遞速度
-                              float overlap = (minDist - dist) / 2f;
-                              float nx = dx / dist, ny = dy / dist;
-                              if (!a.isDragging) { a.x -= nx * overlap; a.y -= ny * overlap; }
-                              if (!b2.isDragging) { b2.x += nx * overlap; b2.y += ny * overlap; }
+                  // 球與球：推開重疊但不傳遞速度
+                  for (int i=0; i<balls.size(); i++) {
+                      for (int j=i+1; j<balls.size(); j++) {
+                          Ball a=balls.get(i), b2=balls.get(j);
+                          float dx=b2.x-a.x, dy=b2.y-a.y;
+                          float dist=(float)Math.sqrt(dx*dx+dy*dy);
+                          float minD=a.radius+b2.radius;
+                          if (dist<minD && dist>0.01f) {
+                              float overlap=(minD-dist)/2f;
+                              float nx=dx/dist, ny=dy/dist;
+                              if (!a.isDragging)  { a.x-=nx*overlap;  a.y-=ny*overlap; }
+                              if (!b2.isDragging) { b2.x+=nx*overlap; b2.y+=ny*overlap; }
                           }
                       }
                   }
@@ -195,7 +183,6 @@ jobs:
           }
           JEOF
 
-          # ── OverlayView.java ──
           cat > app/src/main/java/com/example/balloverlay/OverlayView.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
@@ -211,121 +198,97 @@ jobs:
           import android.view.View;
           import java.util.ArrayList;
           import java.util.List;
-
           @SuppressLint("ViewConstructor")
           public class OverlayView extends View {
               private final List<Ball> balls = new ArrayList<>();
               private PhysicsEngine physics;
               private final Handler handler = new Handler(Looper.getMainLooper());
               private long lastTime = System.nanoTime();
-              private final Paint ballPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private final Paint shadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private static final float FORCE = 3000f; // 拖曳施力強度
-
+              private static final float FORCE = 3000f;
+              private Ball dragging = null;
               private final Runnable loop = new Runnable() {
                   @Override public void run() {
                       long now = System.nanoTime();
-                      float dt = Math.min((now - lastTime) / 1e9f, 0.05f);
+                      float dt = Math.min((now-lastTime)/1e9f, 0.05f);
                       lastTime = now;
                       if (physics != null) physics.step(balls, dt);
                       invalidate();
                       handler.postDelayed(this, 16);
                   }
               };
-
               public OverlayView(Context context, int screenW, int screenH) {
                   super(context);
                   physics = new PhysicsEngine(screenW, screenH);
-                  shadowPaint.setColor(Color.parseColor("#44000000"));
                   handler.post(loop);
               }
-
-              public void addBall(float x, float y, float radius) {
-                  balls.add(new Ball(x, y, radius));
-              }
-
+              public void addBall(float x, float y, float radius) { balls.add(new Ball(x,y,radius)); }
               public void clearBalls() { balls.clear(); }
-
-              public void updateScreen(int w, int h) {
-                  if (physics != null) physics.setScreen(w, h);
+              public void updateScreen(int w, int h) { if(physics!=null) physics.setScreen(w,h); }
+              private int lighten(int color) {
+                  return Color.rgb(
+                      Math.min(255,Color.red(color)+80),
+                      Math.min(255,Color.green(color)+80),
+                      Math.min(255,Color.blue(color)+80));
               }
-
-              @Override
-              protected void onDraw(Canvas canvas) {
+              @Override protected void onDraw(Canvas canvas) {
+                  Paint ballPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  Paint shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
                   for (Ball b : balls) {
-                      // 陰影
-                      shadowPaint.setShader(new RadialGradient(
-                          b.x + b.radius*0.15f, b.y + b.radius*0.15f, b.radius,
+                      shadow.setShader(new RadialGradient(
+                          b.x+b.radius*0.15f, b.y+b.radius*0.15f, b.radius,
                           Color.parseColor("#55000000"), Color.TRANSPARENT, Shader.TileMode.CLAMP));
-                      canvas.drawCircle(b.x + b.radius*0.1f, b.y + b.radius*0.1f, b.radius, shadowPaint);
-                      // 球體漸層
+                      canvas.drawCircle(b.x+b.radius*0.1f, b.y+b.radius*0.1f, b.radius, shadow);
                       ballPaint.setShader(new RadialGradient(
-                          b.x - b.radius*0.3f, b.y - b.radius*0.3f, b.radius,
+                          b.x-b.radius*0.3f, b.y-b.radius*0.3f, b.radius,
                           lighten(b.color), b.color, Shader.TileMode.CLAMP));
                       canvas.drawCircle(b.x, b.y, b.radius, ballPaint);
-                      // 高光
                       Paint hl = new Paint(Paint.ANTI_ALIAS_FLAG);
                       hl.setColor(Color.parseColor("#55FFFFFF"));
-                      canvas.drawCircle(b.x - b.radius*0.3f, b.y - b.radius*0.3f, b.radius*0.25f, hl);
+                      canvas.drawCircle(b.x-b.radius*0.3f, b.y-b.radius*0.3f, b.radius*0.25f, hl);
                   }
               }
-
-              private int lighten(int color) {
-                  int r = Math.min(255, (Color.red(color) + 80));
-                  int g = Math.min(255, (Color.green(color) + 80));
-                  int b = Math.min(255, (Color.blue(color) + 80));
-                  return Color.rgb(r, g, b);
-              }
-
-              // 找到被觸碰的球
               private Ball findBall(float x, float y) {
-                  for (int i = balls.size()-1; i >= 0; i--) {
-                      Ball b = balls.get(i);
-                      float dx = x - b.x, dy = y - b.y;
-                      if (dx*dx + dy*dy <= b.radius*b.radius) return b;
+                  for (int i=balls.size()-1; i>=0; i--) {
+                      Ball b=balls.get(i);
+                      float dx=x-b.x, dy=y-b.y;
+                      if (dx*dx+dy*dy<=b.radius*b.radius) return b;
                   }
                   return null;
               }
-
-              private Ball dragging = null;
-
-              @Override
-              public boolean onTouchEvent(MotionEvent e) {
-                  float x = e.getX(), y = e.getY();
-                  switch (e.getAction()) {
+              @Override public boolean onTouchEvent(MotionEvent e) {
+                  float x=e.getX(), y=e.getY();
+                  switch(e.getAction()) {
                       case MotionEvent.ACTION_DOWN:
-                          dragging = findBall(x, y);
-                          if (dragging != null) {
-                              dragging.isDragging = true;
-                              dragging.dragLastX = x; dragging.dragLastY = y;
-                              dragging.dragVx = 0; dragging.dragVy = 0;
+                          dragging = findBall(x,y);
+                          if (dragging!=null) {
+                              dragging.isDragging=true;
+                              dragging.dragLastX=x; dragging.dragLastY=y;
                           }
+                          // 若沒碰到球，回傳 false 讓事件穿透到底下
                           return dragging != null;
                       case MotionEvent.ACTION_MOVE:
-                          if (dragging != null) {
-                              // 計算拖曳方向，施力（累積速度，非直接移動位置）
-                              float ddx = x - dragging.dragLastX;
-                              float ddy = y - dragging.dragLastY;
-                              dragging.vx += ddx * FORCE * 0.016f;
-                              dragging.vy += ddy * FORCE * 0.016f;
-                              // 跟手移動位置
-                              dragging.x = x; dragging.y = y;
-                              dragging.dragLastX = x; dragging.dragLastY = y;
+                          if (dragging!=null) {
+                              float ddx=x-dragging.dragLastX, ddy=y-dragging.dragLastY;
+                              dragging.vx+=ddx*FORCE*0.016f;
+                              dragging.vy+=ddy*FORCE*0.016f;
+                              dragging.x=x; dragging.y=y;
+                              dragging.dragLastX=x; dragging.dragLastY=y;
+                              return true;
                           }
-                          return true;
+                          return false;
                       case MotionEvent.ACTION_UP:
                       case MotionEvent.ACTION_CANCEL:
-                          if (dragging != null) { dragging.isDragging = false; dragging = null; }
-                          return true;
+                          if (dragging!=null) {
+                              dragging.isDragging=false; dragging=null; return true;
+                          }
+                          return false;
                   }
                   return false;
               }
-
               public void destroy() { handler.removeCallbacks(loop); }
           }
           JEOF
 
-          # ── SummonOverlayActivity.java (半透明全螢幕，用於點選召喚位置) ──
           cat > app/src/main/java/com/example/balloverlay/SummonOverlayActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
@@ -339,28 +302,21 @@ jobs:
           import android.view.Window;
           import android.view.WindowManager;
           public class SummonOverlayActivity extends Activity {
-              private float startX = -1, startY = -1;
-              private float curX, curY;
+              private float startX=-1, startY=-1, curX, curY;
               private DrawView drawView;
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
+              @Override protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   requestWindowFeature(Window.FEATURE_NO_TITLE);
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
                       WindowManager.LayoutParams.FLAG_FULLSCREEN);
-                  getWindow().setBackgroundDrawableResource(android.R.color.transparent);
-                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
-                  getWindow().getAttributes().alpha = 0.85f;
                   drawView = new DrawView(this);
                   setContentView(drawView);
               }
-
               @SuppressLint("ViewConstructor")
               class DrawView extends View {
-                  private final Paint bgPaint = new Paint();
-                  private final Paint circlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  private final Paint hintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint bgPaint=new Paint();
+                  private final Paint circlePaint=new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint hintPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
                   DrawView(SummonOverlayActivity ctx) {
                       super(ctx);
                       bgPaint.setColor(Color.parseColor("#AA000000"));
@@ -369,38 +325,30 @@ jobs:
                       hintPaint.setColor(Color.WHITE); hintPaint.setTextSize(48f);
                       hintPaint.setTextAlign(Paint.Align.CENTER); hintPaint.setAntiAlias(true);
                   }
-
                   @Override protected void onDraw(Canvas canvas) {
                       canvas.drawRect(0,0,getWidth(),getHeight(),bgPaint);
-                      if (startX < 0) {
-                          canvas.drawText("點擊圓心", getWidth()/2f, getHeight()/2f - 30f, hintPaint);
-                          canvas.drawText("拖曳決定大小", getWidth()/2f, getHeight()/2f + 40f, hintPaint);
+                      if (startX<0) {
+                          canvas.drawText("點擊圓心", getWidth()/2f, getHeight()/2f-30f, hintPaint);
+                          canvas.drawText("拖曳決定大小", getWidth()/2f, getHeight()/2f+40f, hintPaint);
                       } else {
-                          float r = (float)Math.sqrt((curX-startX)*(curX-startX)+(curY-startY)*(curY-startY));
-                          canvas.drawCircle(startX, startY, Math.max(r, 10f), circlePaint);
-                          Paint linePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                          linePaint.setColor(Color.WHITE); linePaint.setStrokeWidth(2f);
-                          canvas.drawLine(startX, startY, curX, curY, linePaint);
+                          float r=(float)Math.sqrt((curX-startX)*(curX-startX)+(curY-startY)*(curY-startY));
+                          canvas.drawCircle(startX, startY, Math.max(r,10f), circlePaint);
+                          Paint lp=new Paint(Paint.ANTI_ALIAS_FLAG); lp.setColor(Color.WHITE); lp.setStrokeWidth(2f);
+                          canvas.drawLine(startX,startY,curX,curY,lp);
                           hintPaint.setTextSize(36f);
-                          canvas.drawText("半徑: " + (int)r + " px", startX, startY - r - 20f, hintPaint);
+                          canvas.drawText("半徑: "+(int)r+" px", startX, startY-r-20f, hintPaint);
                           canvas.drawText("放開手指召喚", getWidth()/2f, 100f, hintPaint);
                       }
                   }
-
                   @Override public boolean onTouchEvent(MotionEvent e) {
                       switch(e.getAction()) {
-                          case MotionEvent.ACTION_DOWN:
-                              startX = e.getX(); startY = e.getY();
-                              curX = startX; curY = startY;
-                              invalidate(); return true;
-                          case MotionEvent.ACTION_MOVE:
-                              curX = e.getX(); curY = e.getY();
-                              invalidate(); return true;
+                          case MotionEvent.ACTION_DOWN: startX=e.getX(); startY=e.getY(); curX=startX; curY=startY; invalidate(); return true;
+                          case MotionEvent.ACTION_MOVE: curX=e.getX(); curY=e.getY(); invalidate(); return true;
                           case MotionEvent.ACTION_UP:
-                              float r = (float)Math.sqrt((curX-startX)*(curX-startX)+(curY-startY)*(curY-startY));
-                              r = Math.max(r, 20f);
-                              // 通知 OverlayService 召喚球
-                              OverlayService.getInstance().addBall(startX, startY, r);
+                              float r=(float)Math.sqrt((curX-startX)*(curX-startX)+(curY-startY)*(curY-startY));
+                              r=Math.max(r,20f);
+                              OverlayService svc=OverlayService.getInstance();
+                              if(svc!=null) svc.addBall(startX,startY,r);
                               finish(); return true;
                       }
                       return false;
@@ -409,7 +357,6 @@ jobs:
           }
           JEOF
 
-          # ── OverlayService.java ──
           cat > app/src/main/java/com/example/balloverlay/OverlayService.java << 'JEOF'
           package com.example.balloverlay;
           import android.app.Notification;
@@ -417,7 +364,6 @@ jobs:
           import android.app.NotificationManager;
           import android.app.PendingIntent;
           import android.app.Service;
-          import android.content.Context;
           import android.content.Intent;
           import android.graphics.PixelFormat;
           import android.os.Build;
@@ -425,85 +371,64 @@ jobs:
           import android.util.DisplayMetrics;
           import android.view.WindowManager;
           import androidx.core.app.NotificationCompat;
-
           public class OverlayService extends Service {
               private static OverlayService instance;
               private WindowManager wm;
               private OverlayView overlayView;
               private int screenW, screenH;
-
               public static OverlayService getInstance() { return instance; }
-
-              @Override
-              public void onCreate() {
+              @Override public void onCreate() {
                   super.onCreate();
                   instance = this;
-                  wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  wm = (WindowManager)getSystemService(WINDOW_SERVICE);
                   DisplayMetrics dm = new DisplayMetrics();
                   wm.getDefaultDisplay().getRealMetrics(dm);
-                  screenW = dm.widthPixels; screenH = dm.heightPixels;
-
+                  screenW=dm.widthPixels; screenH=dm.heightPixels;
                   overlayView = new OverlayView(this, screenW, screenH);
-
                   int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                       ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                       : WindowManager.LayoutParams.TYPE_PHONE;
-
                   WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                       WindowManager.LayoutParams.MATCH_PARENT,
                       WindowManager.LayoutParams.MATCH_PARENT,
                       type,
+                      // FLAG_NOT_TOUCH_MODAL 讓觸控穿透到底下的 App
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
+                      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL |
                       WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
                       WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                       PixelFormat.TRANSLUCENT);
-
                   wm.addView(overlayView, params);
                   startForeground(1, buildNotification());
               }
-
               private Notification buildNotification() {
-                  String channelId = "ball_overlay";
+                  String ch="ball_overlay";
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      NotificationChannel ch = new NotificationChannel(channelId, "球體覆蓋層", NotificationManager.IMPORTANCE_LOW);
-                      ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
+                      NotificationChannel nc=new NotificationChannel(ch,"球體覆蓋層",NotificationManager.IMPORTANCE_LOW);
+                      ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(nc);
                   }
-                  Intent intent = new Intent(this, MainActivity.class);
-                  PendingIntent pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);
-                  return new NotificationCompat.Builder(this, channelId)
+                  PendingIntent pi=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE);
+                  return new NotificationCompat.Builder(this,ch)
                       .setContentTitle("球體覆蓋層運行中")
                       .setContentText("點擊返回主選單")
                       .setSmallIcon(android.R.drawable.ic_dialog_info)
-                      .setContentIntent(pi)
-                      .build();
+                      .setContentIntent(pi).build();
               }
-
-              public void addBall(float x, float y, float radius) {
-                  if (overlayView != null) overlayView.addBall(x, y, radius);
-              }
-
-              public void clearBalls() {
-                  if (overlayView != null) overlayView.clearBalls();
-              }
-
-              @Override
-              public int onStartCommand(Intent intent, int flags, int startId) {
-                  if (intent != null && "CLEAR".equals(intent.getAction())) clearBalls();
+              public void addBall(float x, float y, float radius) { if(overlayView!=null) overlayView.addBall(x,y,radius); }
+              public void clearBalls() { if(overlayView!=null) overlayView.clearBalls(); }
+              @Override public int onStartCommand(Intent intent, int flags, int startId) {
+                  if(intent!=null&&"CLEAR".equals(intent.getAction())) clearBalls();
                   return START_STICKY;
               }
-
-              @Override
-              public void onDestroy() {
+              @Override public void onDestroy() {
                   super.onDestroy();
-                  if (overlayView != null) { overlayView.destroy(); wm.removeView(overlayView); }
-                  instance = null;
+                  if(overlayView!=null){overlayView.destroy();wm.removeView(overlayView);}
+                  instance=null;
               }
-
               @Override public IBinder onBind(Intent i) { return null; }
           }
           JEOF
 
-          # ── MainActivity.java ──
           cat > app/src/main/java/com/example/balloverlay/MainActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.content.Intent;
@@ -514,58 +439,43 @@ jobs:
           import android.widget.Button;
           import android.widget.Toast;
           import androidx.appcompat.app.AppCompatActivity;
-
           public class MainActivity extends AppCompatActivity {
-              private static final int REQ_OVERLAY = 1001;
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
+              private static final int REQ_OVERLAY=1001;
+              @Override protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   setContentView(R.layout.activity_main);
-
-                  // 啟動 OverlayService（若未啟動）
-                  startService();
-
-                  Button btnSummon = findViewById(R.id.btnSummon);
-                  Button btnClear  = findViewById(R.id.btnClear);
-
-                  btnSummon.setOnClickListener(v -> {
-                      if (!hasOverlayPermission()) { requestOverlayPermission(); return; }
-                      // 開啟半透明召喚畫面
-                      startActivity(new Intent(this, SummonOverlayActivity.class));
-                      // 暫時最小化 MainActivity 讓使用者看到底下畫面
+                  ensureServiceRunning();
+                  findViewById(R.id.btnSummon).setOnClickListener(v -> {
+                      if(!hasOverlayPermission()){requestOverlayPermission();return;}
+                      startActivity(new Intent(this,SummonOverlayActivity.class));
                       moveTaskToBack(true);
                   });
-
-                  btnClear.setOnClickListener(v -> {
-                      if (OverlayService.getInstance() != null)
-                          OverlayService.getInstance().clearBalls();
-                      Toast.makeText(this, "已刪除所有物體", Toast.LENGTH_SHORT).show();
+                  findViewById(R.id.btnClear).setOnClickListener(v -> {
+                      if(OverlayService.getInstance()!=null) OverlayService.getInstance().clearBalls();
+                      Toast.makeText(this,"已刪除所有物體",Toast.LENGTH_SHORT).show();
                   });
               }
-
-              private void startService() {
-                  if (!hasOverlayPermission()) { requestOverlayPermission(); return; }
-                  if (OverlayService.getInstance() == null)
-                      startService(new Intent(this, OverlayService.class));
+              @Override protected void onResume() {
+                  super.onResume();
+                  ensureServiceRunning();
               }
-
+              private void ensureServiceRunning() {
+                  if(!hasOverlayPermission()){requestOverlayPermission();return;}
+                  if(OverlayService.getInstance()==null)
+                      startService(new Intent(this,OverlayService.class));
+              }
               private boolean hasOverlayPermission() {
                   return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this);
               }
-
               private void requestOverlayPermission() {
-                  Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                      Uri.parse("package:" + getPackageName()));
-                  startActivityForResult(i, REQ_OVERLAY);
+                  startActivityForResult(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                      Uri.parse("package:"+getPackageName())), REQ_OVERLAY);
               }
-
-              @Override
-              protected void onActivityResult(int req, int res, Intent data) {
-                  super.onActivityResult(req, res, data);
-                  if (req == REQ_OVERLAY) {
-                      if (hasOverlayPermission()) startService();
-                      else Toast.makeText(this, "需要「顯示在其他應用程式上方」的權限", Toast.LENGTH_LONG).show();
+              @Override protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req,res,data);
+                  if(req==REQ_OVERLAY) {
+                      if(hasOverlayPermission()) ensureServiceRunning();
+                      else Toast.makeText(this,"需要「顯示在其他應用程式上方」的權限",Toast.LENGTH_LONG).show();
                   }
               }
           }
@@ -576,36 +486,24 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
               android:layout_width="match_parent" android:layout_height="match_parent"
-              android:orientation="vertical" android:background="#1A1A2E"
-              android:gravity="center">
-
+              android:orientation="vertical" android:background="#1A1A2E" android:gravity="center">
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                  android:text="🎱 球體召喚器" android:textColor="#FFFFFF"
-                  android:textSize="28sp" android:textStyle="bold"
-                  android:layout_marginBottom="12dp"/>
-
+                  android:text="球體召喚器" android:textColor="#FFFFFF"
+                  android:textSize="28sp" android:textStyle="bold" android:layout_marginBottom="12dp"/>
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
                   android:text="召喚後球會顯示在所有應用程式上方"
-                  android:textColor="#90A4AE" android:textSize="14sp"
-                  android:layout_marginBottom="48dp"/>
-
+                  android:textColor="#90A4AE" android:textSize="14sp" android:layout_marginBottom="48dp"/>
               <Button android:id="@+id/btnSummon"
                   android:layout_width="260dp" android:layout_height="64dp"
-                  android:text="⚽ 召喚球"
-                  android:textSize="18sp" android:textColor="#FFFFFF" android:textStyle="bold"
-                  android:backgroundTint="#1565C0"
-                  android:layout_marginBottom="20dp"/>
-
+                  android:text="召喚球" android:textSize="18sp" android:textColor="#FFFFFF"
+                  android:textStyle="bold" android:backgroundTint="#1565C0" android:layout_marginBottom="20dp"/>
               <Button android:id="@+id/btnClear"
                   android:layout_width="260dp" android:layout_height="64dp"
-                  android:text="🗑 刪除所有物體"
-                  android:textSize="18sp" android:textColor="#FFFFFF" android:textStyle="bold"
-                  android:backgroundTint="#B71C1C"/>
-
+                  android:text="刪除所有物體" android:textSize="18sp" android:textColor="#FFFFFF"
+                  android:textStyle="bold" android:backgroundTint="#B71C1C"/>
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                  android:text="按住球可施力移動它"
-                  android:textColor="#546E7A" android:textSize="13sp"
-                  android:layout_marginTop="32dp"/>
+                  android:text="按住球可施力移動它" android:textColor="#546E7A"
+                  android:textSize="13sp" android:layout_marginTop="32dp"/>
           </LinearLayout>
           EOF
 
@@ -655,9 +553,6 @@ jobs:
                 > app/src/main/res/mipmap-$density/$name.xml
             done
           done
-
-          # 套用透明主題到召喚 Activity（需在 manifest 中指定）
-          sed -i 's|android:theme="@style/Theme.BallOverlay">|android:theme="@style/Theme.BallOverlay">\n                  <activity android:name=".SummonOverlayActivity" android:theme="@style/Theme.BallOverlay.Transparent" android:exported="false"/>|' app/src/main/AndroidManifest.xml
 
           mkdir -p gradle/wrapper
           curl -sL "https://github.com/gradle/gradle/raw/v8.2.0/gradle/wrapper/gradle-wrapper.jar" \
