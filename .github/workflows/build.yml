@@ -49,8 +49,8 @@ jobs:
                   applicationId "com.example.balloverlay"
                   minSdk 24
                   targetSdk 34
-                  versionCode 3
-                  versionName "3.0"
+                  versionCode 4
+                  versionName "4.0"
               }
               signingConfigs {
                   release {
@@ -91,21 +91,15 @@ jobs:
                   android:roundIcon="@mipmap/ic_launcher_round"
                   android:supportsRtl="true"
                   android:theme="@style/Theme.BallOverlay">
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true">
+                  <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
-                  <activity
-                      android:name=".SummonActivity"
-                      android:theme="@style/Theme.Translucent"
-                      android:exported="false"/>
-                  <service
-                      android:name=".OverlayService"
-                      android:exported="false"
+                  <activity android:name=".SummonActivity"
+                      android:theme="@style/Theme.Translucent" android:exported="false"/>
+                  <service android:name=".OverlayService" android:exported="false"
                       android:foregroundServiceType="specialUse"/>
               </application>
           </manifest>
@@ -113,7 +107,6 @@ jobs:
 
           mkdir -p app/src/main/java/com/example/balloverlay
 
-          # Ball.java
           cat > app/src/main/java/com/example/balloverlay/Ball.java << 'JEOF'
           package com.example.balloverlay;
           import android.graphics.Color;
@@ -137,7 +130,6 @@ jobs:
           }
           JEOF
 
-          # PhysicsEngine.java
           cat > app/src/main/java/com/example/balloverlay/PhysicsEngine.java << 'JEOF'
           package com.example.balloverlay;
           import java.util.List;
@@ -149,8 +141,8 @@ jobs:
               public void step(List<Ball> balls, float dt) {
                   for (Ball b : balls) {
                       if (b.isDragging) continue;
-                      b.vy += GRAVITY*dt; b.vx *= FRICTION;
-                      b.x += b.vx*dt; b.y += b.vy*dt;
+                      b.vy+=GRAVITY*dt; b.vx*=FRICTION;
+                      b.x+=b.vx*dt; b.y+=b.vy*dt;
                       if (b.x-b.radius<0)  { b.x=b.radius;   b.vx= Math.abs(b.vx)*DAMPING; }
                       if (b.x+b.radius>W)  { b.x=W-b.radius; b.vx=-Math.abs(b.vx)*DAMPING; }
                       if (b.y-b.radius<0)  { b.y=b.radius;   b.vy= Math.abs(b.vy)*DAMPING; }
@@ -172,7 +164,6 @@ jobs:
           }
           JEOF
 
-          # OverlayView.java
           cat > app/src/main/java/com/example/balloverlay/OverlayView.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
@@ -224,13 +215,20 @@ jobs:
                   }
                   return null;
               }
+              // dispatchTouchEvent: 只有命中球才處理，否則穿透到底下
+              @Override public boolean dispatchTouchEvent(MotionEvent e) {
+                  float x=e.getX(), y=e.getY();
+                  boolean hitBall = (findBall(x,y)!=null) || (dragging!=null);
+                  if (!hitBall) return false;
+                  return super.dispatchTouchEvent(e);
+              }
               @Override public boolean onTouchEvent(MotionEvent e) {
                   float x=e.getX(), y=e.getY();
-                  switch (e.getAction()) {
+                  switch(e.getAction()) {
                       case MotionEvent.ACTION_DOWN:
                           dragging=findBall(x,y);
-                          if (dragging!=null) { dragging.isDragging=true; dragging.dragLastX=x; dragging.dragLastY=y; }
-                          return dragging!=null; // 未命中球時回傳false，讓事件穿透
+                          if (dragging!=null) { dragging.isDragging=true; dragging.dragLastX=x; dragging.dragLastY=y; return true; }
+                          return false;
                       case MotionEvent.ACTION_MOVE:
                           if (dragging!=null) {
                               float ddx=x-dragging.dragLastX, ddy=y-dragging.dragLastY;
@@ -250,8 +248,6 @@ jobs:
           }
           JEOF
 
-          # OverlayService.java — 關鍵：不在 onCreate 就覆蓋畫面
-          # 而是只在有球時才 addView，沒球時 removeView
           cat > app/src/main/java/com/example/balloverlay/OverlayService.java << 'JEOF'
           package com.example.balloverlay;
           import android.app.*;
@@ -268,17 +264,14 @@ jobs:
               private boolean viewAdded = false;
               private int screenW, screenH;
               public static OverlayService getInstance() { return instance; }
-
               @Override public void onCreate() {
                   super.onCreate(); instance=this;
                   wm=(WindowManager)getSystemService(WINDOW_SERVICE);
                   DisplayMetrics dm=new DisplayMetrics(); wm.getDefaultDisplay().getRealMetrics(dm);
                   screenW=dm.widthPixels; screenH=dm.heightPixels;
-                  // 建立 OverlayView 但先不加到視窗
                   overlayView=new OverlayView(this,screenW,screenH);
                   startForeground(1,buildNotification());
               }
-
               private WindowManager.LayoutParams makeParams() {
                   int type=Build.VERSION.SDK_INT>=Build.VERSION_CODES.O
                       ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -292,24 +285,18 @@ jobs:
                       | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                       PixelFormat.TRANSLUCENT);
               }
-
-              // 只在需要顯示時才 addView
               private void ensureViewAdded() {
                   if (!viewAdded) { wm.addView(overlayView,makeParams()); viewAdded=true; }
               }
-
               public void addBall(float x, float y, float r) {
                   if (overlayView==null) return;
-                  ensureViewAdded(); // 第一個球加入時才掛上視窗
+                  ensureViewAdded();
                   overlayView.addBall(x,y,r);
               }
-
               public void clearBalls() {
                   if (overlayView!=null) overlayView.clearBalls();
-                  // 移除視窗，讓畫面乾淨
                   if (viewAdded) { wm.removeView(overlayView); viewAdded=false; }
               }
-
               private Notification buildNotification() {
                   String ch="ball_ch";
                   if (Build.VERSION.SDK_INT>=Build.VERSION_CODES.O)
@@ -320,7 +307,6 @@ jobs:
                       .setContentTitle("球體召喚器").setContentText("點擊返回主選單")
                       .setSmallIcon(android.R.drawable.ic_dialog_info).setContentIntent(pi).build();
               }
-
               @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
               @Override public void onDestroy() {
                   super.onDestroy();
@@ -331,12 +317,10 @@ jobs:
           }
           JEOF
 
-          # SummonActivity.java — 透明全螢幕，讓用戶點擊選圓心和半徑
           cat > app/src/main/java/com/example/balloverlay/SummonActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
           import android.app.Activity;
-          import android.content.Intent;
           import android.graphics.*;
           import android.os.Bundle;
           import android.view.*;
@@ -389,7 +373,6 @@ jobs:
           }
           JEOF
 
-          # MainActivity.java — 不自動啟動 Service，只在用戶按按鈕時才啟動
           cat > app/src/main/java/com/example/balloverlay/MainActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.content.Intent;
@@ -400,7 +383,7 @@ jobs:
           import android.widget.Toast;
           import androidx.appcompat.app.AppCompatActivity;
           public class MainActivity extends AppCompatActivity {
-              private static final int REQ_PERM=1001, REQ_SUMMON=1002;
+              private static final int REQ_PERM=1001;
               @Override protected void onCreate(Bundle s) {
                   super.onCreate(s);
                   setContentView(R.layout.activity_main);
@@ -408,23 +391,22 @@ jobs:
                   findViewById(R.id.btnClear).setOnClickListener(v -> onClear());
               }
               private void onSummon() {
-                  if (!hasPerm()) { requestPerm(REQ_PERM); return; }
-                  // 確保 Service 在執行
+                  if (!hasPerm()) { requestPerm(); return; }
                   startService(new Intent(this,OverlayService.class));
-                  // 開啟透明召喚畫面
-                  startActivityForResult(new Intent(this,SummonActivity.class),REQ_SUMMON);
+                  startActivity(new Intent(this,SummonActivity.class));
+                  moveTaskToBack(true);
               }
               private void onClear() {
                   OverlayService svc=OverlayService.getInstance();
                   if(svc!=null) svc.clearBalls();
-                  else Toast.makeText(this,"目前沒有球",Toast.LENGTH_SHORT).show();
+                  Toast.makeText(this,"已刪除所有物體",Toast.LENGTH_SHORT).show();
               }
               private boolean hasPerm() {
                   return Build.VERSION.SDK_INT<Build.VERSION_CODES.M||Settings.canDrawOverlays(this);
               }
-              private void requestPerm(int req) {
+              private void requestPerm() {
                   startActivityForResult(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                      Uri.parse("package:"+getPackageName())),req);
+                      Uri.parse("package:"+getPackageName())),REQ_PERM);
               }
               @Override protected void onActivityResult(int req, int res, Intent data) {
                   super.onActivityResult(req,res,data);
