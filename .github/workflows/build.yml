@@ -49,8 +49,8 @@ jobs:
                   applicationId "com.example.balloverlay"
                   minSdk 24
                   targetSdk 34
-                  versionCode 5
-                  versionName "5.0"
+                  versionCode 6
+                  versionName "6.0"
               }
               signingConfigs {
                   release {
@@ -82,8 +82,6 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
               <application
                   android:allowBackup="true"
                   android:icon="@mipmap/ic_launcher"
@@ -99,10 +97,33 @@ jobs:
                   </activity>
                   <activity android:name=".SummonActivity"
                       android:theme="@style/Theme.Translucent" android:exported="false"/>
-                  <service android:name=".OverlayService" android:exported="false"
-                      android:foregroundServiceType="specialUse"/>
+                  <service
+                      android:name=".BallAccessibilityService"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config"/>
+                  </service>
               </application>
           </manifest>
+          EOF
+
+          # Accessibility Service 設定檔
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/accessibility_service_config.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeAllMask"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows"
+              android:canRetrieveWindowContent="false"
+              android:description="@string/accessibility_description"
+              android:notificationTimeout="0"
+              android:settingsActivity=".MainActivity"/>
           EOF
 
           mkdir -p app/src/main/java/com/example/balloverlay
@@ -164,39 +185,46 @@ jobs:
           }
           JEOF
 
-          # OverlayView：只負責繪製，不處理觸控
-          cat > app/src/main/java/com/example/balloverlay/OverlayView.java << 'JEOF'
+          # BallOverlayView：繪製球，使用 Accessibility Service 的 Window
+          cat > app/src/main/java/com/example/balloverlay/BallOverlayView.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
           import android.content.Context;
           import android.graphics.*;
           import android.os.Handler;
           import android.os.Looper;
+          import android.view.MotionEvent;
           import android.view.View;
           import java.util.*;
           @SuppressLint("ViewConstructor")
-          public class OverlayView extends View {
+          public class BallOverlayView extends View {
               public final List<Ball> balls = new ArrayList<>();
               private final PhysicsEngine physics;
               private final Handler handler = new Handler(Looper.getMainLooper());
               private long lastTime = System.nanoTime();
+              private Ball dragging = null;
+              private static final float FORCE = 40f;
               private final Runnable loop = new Runnable() {
                   @Override public void run() {
                       long now=System.nanoTime(); float dt=Math.min((now-lastTime)/1e9f,0.05f); lastTime=now;
                       physics.step(balls,dt); invalidate(); handler.postDelayed(this,16);
                   }
               };
-              public OverlayView(Context ctx, int w, int h) {
-                  super(ctx); physics=new PhysicsEngine(w,h);
-                  // 這個 View 完全不接受觸控，只繪製
-                  setClickable(false); setFocusable(false);
-                  handler.post(loop);
+              public BallOverlayView(Context ctx, int w, int h) {
+                  super(ctx); physics=new PhysicsEngine(w,h); handler.post(loop);
               }
               public void addBall(float x, float y, float r) { balls.add(new Ball(x,y,r)); }
               public void clearBalls() { balls.clear(); }
               public void destroy() { handler.removeCallbacks(loop); }
               private int lighten(int c) {
                   return Color.rgb(Math.min(255,Color.red(c)+80),Math.min(255,Color.green(c)+80),Math.min(255,Color.blue(c)+80));
+              }
+              public Ball findBall(float x, float y) {
+                  for (int i=balls.size()-1;i>=0;i--) {
+                      Ball b=balls.get(i); float dx=x-b.x,dy=y-b.y;
+                      if (dx*dx+dy*dy<=b.radius*b.radius) return b;
+                  }
+                  return null;
               }
               @Override protected void onDraw(Canvas canvas) {
                   Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -209,235 +237,123 @@ jobs:
                       canvas.drawCircle(b.x-b.radius*.3f,b.y-b.radius*.3f,b.radius*.25f,p);
                   }
               }
-              // 給 TouchView 用：找球
-              public Ball findBall(float x, float y) {
-                  for (int i=balls.size()-1;i>=0;i--) {
-                      Ball b=balls.get(i); float dx=x-b.x,dy=y-b.y;
-                      if (dx*dx+dy*dy<=b.radius*b.radius) return b;
-                  }
-                  return null;
-              }
-          }
-          JEOF
-
-          # TouchView：專門處理觸控，完全透明不繪製任何東西
-          # 使用 FLAG_NOT_TOUCHABLE，只在命中球時動態切換成可觸碰
-          cat > app/src/main/java/com/example/balloverlay/TouchView.java << 'JEOF'
-          package com.example.balloverlay;
-          import android.annotation.SuppressLint;
-          import android.content.Context;
-          import android.view.MotionEvent;
-          import android.view.View;
-          @SuppressLint("ViewConstructor")
-          public class TouchView extends View {
-              private OverlayView overlayView;
-              private Ball dragging = null;
-              private static final float FORCE = 40f;
-              private TouchCallback callback;
-              public interface TouchCallback {
-                  void onHitBall();
-                  void onReleaseBall();
-              }
-              public TouchView(Context ctx, OverlayView ov, TouchCallback cb) {
-                  super(ctx);
-                  this.overlayView = ov;
-                  this.callback = cb;
-                  setBackgroundColor(0x00000000);
-              }
-              @Override public boolean onTouchEvent(MotionEvent e) {
-                  float x=e.getX(), y=e.getY();
-                  switch(e.getAction()) {
-                      case MotionEvent.ACTION_DOWN:
-                          dragging = overlayView.findBall(x,y);
-                          if (dragging!=null) {
-                              dragging.isDragging=true;
-                              dragging.dragLastX=x; dragging.dragLastY=y;
-                              return true;
-                          }
-                          // 沒碰到球：通知釋放，讓系統切回不可觸
-                          callback.onReleaseBall();
-                          return false;
-                      case MotionEvent.ACTION_MOVE:
-                          if (dragging!=null) {
-                              float ddx=x-dragging.dragLastX, ddy=y-dragging.dragLastY;
-                              dragging.vx+=ddx*FORCE; dragging.vy+=ddy*FORCE;
-                              dragging.x=x; dragging.y=y;
-                              dragging.dragLastX=x; dragging.dragLastY=y;
-                              return true;
-                          }
-                          return false;
-                      case MotionEvent.ACTION_UP:
-                      case MotionEvent.ACTION_CANCEL:
-                          if (dragging!=null) {
-                              dragging.isDragging=false; dragging=null;
-                              callback.onReleaseBall();
-                              return true;
-                          }
-                          return false;
-                  }
+              // Accessibility Service 直接呼叫這些方法傳入觸控
+              public boolean handleDown(float x, float y) {
+                  dragging=findBall(x,y);
+                  if (dragging!=null) { dragging.isDragging=true; dragging.dragLastX=x; dragging.dragLastY=y; return true; }
                   return false;
               }
+              public void handleMove(float x, float y) {
+                  if (dragging!=null) {
+                      float ddx=x-dragging.dragLastX, ddy=y-dragging.dragLastY;
+                      dragging.vx+=ddx*FORCE; dragging.vy+=ddy*FORCE;
+                      dragging.x=x; dragging.y=y;
+                      dragging.dragLastX=x; dragging.dragLastY=y;
+                  }
+              }
+              public void handleUp() {
+                  if (dragging!=null) { dragging.isDragging=false; dragging=null; }
+              }
           }
           JEOF
 
-          cat > app/src/main/java/com/example/balloverlay/OverlayService.java << 'JEOF'
+          # BallAccessibilityService：核心服務
+          # 使用 Accessibility 的 Window 顯示球（完全不攔截觸控）
+          # 用 onAccessibilityEvent 的觸控手勢偵測球的互動
+          cat > app/src/main/java/com/example/balloverlay/BallAccessibilityService.java << 'JEOF'
           package com.example.balloverlay;
-          import android.app.*;
-          import android.content.Intent;
+          import android.accessibilityservice.AccessibilityService;
+          import android.accessibilityservice.AccessibilityServiceInfo;
           import android.graphics.PixelFormat;
-          import android.os.*;
-          import android.util.DisplayMetrics;
+          import android.os.Build;
           import android.view.WindowManager;
-          import androidx.core.app.NotificationCompat;
-          public class OverlayService extends Service {
-              private static OverlayService instance;
+          import android.view.accessibility.AccessibilityEvent;
+          import android.util.DisplayMetrics;
+          import android.view.MotionEvent;
+
+          public class BallAccessibilityService extends AccessibilityService {
+              private static BallAccessibilityService instance;
               private WindowManager wm;
-              private OverlayView overlayView;
-              private TouchView touchView;
-              private WindowManager.LayoutParams drawParams;
-              private WindowManager.LayoutParams touchParams;
-              private boolean drawAdded=false, touchAdded=false;
+              private BallOverlayView ballView;
+              private boolean viewAdded = false;
               private int screenW, screenH;
-              public static OverlayService getInstance() { return instance; }
 
-              @Override public void onCreate() {
-                  super.onCreate(); instance=this;
-                  wm=(WindowManager)getSystemService(WINDOW_SERVICE);
-                  DisplayMetrics dm=new DisplayMetrics(); wm.getDefaultDisplay().getRealMetrics(dm);
-                  screenW=dm.widthPixels; screenH=dm.heightPixels;
+              public static BallAccessibilityService getInstance() { return instance; }
 
-                  int type=Build.VERSION.SDK_INT>=Build.VERSION_CODES.O
-                      ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+              @Override public void onServiceConnected() {
+                  super.onServiceConnected();
+                  instance = this;
+                  wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  DisplayMetrics dm = new DisplayMetrics();
+                  wm.getDefaultDisplay().getRealMetrics(dm);
+                  screenW = dm.widthPixels; screenH = dm.heightPixels;
+                  ballView = new BallOverlayView(this, screenW, screenH);
+
+                  // 設定接收觸控手勢
+                  AccessibilityServiceInfo info = getServiceInfo();
+                  if (info != null) {
+                      info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE;
+                      setServiceInfo(info);
+                  }
+              }
+
+              private WindowManager.LayoutParams makeParams() {
+                  int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                      ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
                       : WindowManager.LayoutParams.TYPE_PHONE;
-
-                  // 繪製層：完全不觸控（FLAG_NOT_TOUCHABLE），只顯示球
-                  drawParams=new WindowManager.LayoutParams(
+                  return new WindowManager.LayoutParams(
                       WindowManager.LayoutParams.MATCH_PARENT,
                       WindowManager.LayoutParams.MATCH_PARENT,
                       type,
+                      // 關鍵：FLAG_NOT_TOUCHABLE 讓觸控完全穿透
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                       | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                       | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                       | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                       PixelFormat.TRANSLUCENT);
-
-                  // 觸控層：預設也不觸控，只有需要拖曳時才開啟
-                  touchParams=new WindowManager.LayoutParams(
-                      WindowManager.LayoutParams.MATCH_PARENT,
-                      WindowManager.LayoutParams.MATCH_PARENT,
-                      type,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                      | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                      | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                      | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                      PixelFormat.TRANSLUCENT);
-
-                  overlayView=new OverlayView(this,screenW,screenH);
-                  touchView=new TouchView(this,overlayView, new TouchView.TouchCallback(){
-                      @Override public void onHitBall() { enableTouch(); }
-                      @Override public void onReleaseBall() { disableTouch(); }
-                  });
-
-                  startForeground(1,buildNotification());
-
-                  // 啟動一個 Handler 定期偵測手指是否在球上
-                  // 因為 FLAG_NOT_TOUCHABLE 時收不到事件，
-                  // 改用一個小的「偵測層」Window 攔截所有觸控但立即判斷
-                  startHitDetection(type);
-              }
-
-              // 偵測層：接收所有觸控，判斷是否在球上，決定是否讓觸控層處理
-              private WindowManager.LayoutParams detectParams;
-              private android.view.View detectView;
-              private void startHitDetection(int type) {
-                  detectParams=new WindowManager.LayoutParams(
-                      WindowManager.LayoutParams.MATCH_PARENT,
-                      WindowManager.LayoutParams.MATCH_PARENT,
-                      type,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                      | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                      | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                      PixelFormat.TRANSLUCENT);
-
-                  detectView=new android.view.View(this){
-                      private Ball dragging=null;
-                      private static final float FORCE=40f;
-                      @Override public boolean onTouchEvent(android.view.MotionEvent e){
-                          float x=e.getX(),y=e.getY();
-                          switch(e.getAction()){
-                              case android.view.MotionEvent.ACTION_DOWN:
-                                  dragging=overlayView.findBall(x,y);
-                                  if(dragging!=null){
-                                      dragging.isDragging=true;
-                                      dragging.dragLastX=x; dragging.dragLastY=y;
-                                      return true;
-                                  }
-                                  return false; // 穿透
-                              case android.view.MotionEvent.ACTION_MOVE:
-                                  if(dragging!=null){
-                                      float ddx=x-dragging.dragLastX,ddy=y-dragging.dragLastY;
-                                      dragging.vx+=ddx*FORCE; dragging.vy+=ddy*FORCE;
-                                      dragging.x=x; dragging.y=y;
-                                      dragging.dragLastX=x; dragging.dragLastY=y;
-                                      return true;
-                                  }
-                                  return false;
-                              case android.view.MotionEvent.ACTION_UP:
-                              case android.view.MotionEvent.ACTION_CANCEL:
-                                  if(dragging!=null){dragging.isDragging=false;dragging=null;return true;}
-                                  return false;
-                          }
-                          return false;
-                      }
-                  };
-                  detectView.setBackgroundColor(0x00000000);
-              }
-
-              private void enableTouch() {
-                  if (touchAdded) {
-                      touchParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-                      wm.updateViewLayout(touchView, touchParams);
-                  }
-              }
-              private void disableTouch() {
-                  if (touchAdded) {
-                      touchParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-                      wm.updateViewLayout(touchView, touchParams);
-                  }
               }
 
               public void addBall(float x, float y, float r) {
-                  if (overlayView==null) return;
-                  if (!drawAdded) { wm.addView(overlayView,drawParams); drawAdded=true; }
-                  if (!touchAdded) { wm.addView(detectView,detectParams); touchAdded=true; }
-                  overlayView.addBall(x,y,r);
+                  if (ballView == null) return;
+                  if (!viewAdded) { wm.addView(ballView, makeParams()); viewAdded = true; }
+                  ballView.addBall(x, y, r);
               }
 
               public void clearBalls() {
-                  if (overlayView!=null) overlayView.clearBalls();
-                  if (drawAdded) { wm.removeView(overlayView); drawAdded=false; }
-                  if (touchAdded) { wm.removeView(detectView); touchAdded=false; }
+                  if (ballView != null) ballView.clearBalls();
+                  if (viewAdded) { wm.removeView(ballView); viewAdded = false; }
               }
 
-              private Notification buildNotification() {
-                  String ch="ball_ch";
-                  if (Build.VERSION.SDK_INT>=Build.VERSION_CODES.O)
-                      ((NotificationManager)getSystemService(NOTIFICATION_SERVICE))
-                          .createNotificationChannel(new NotificationChannel(ch,"球體",NotificationManager.IMPORTANCE_LOW));
-                  PendingIntent pi=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE);
-                  return new NotificationCompat.Builder(this,ch)
-                      .setContentTitle("球體召喚器").setContentText("點擊返回主選單")
-                      .setSmallIcon(android.R.drawable.ic_dialog_info).setContentIntent(pi).build();
+              // Accessibility Service 可以接收觸控事件而不攔截它們
+              @Override protected boolean onKeyEvent(android.view.KeyEvent event) { return false; }
+
+              @Override public boolean onGesture(int gestureId) { return false; }
+
+              @Override public void onMotionEvent(MotionEvent event) {
+                  if (ballView == null || !viewAdded) return;
+                  float x = event.getX(), y = event.getY();
+                  switch (event.getAction()) {
+                      case MotionEvent.ACTION_DOWN:
+                          ballView.handleDown(x, y);
+                          break;
+                      case MotionEvent.ACTION_MOVE:
+                          ballView.handleMove(x, y);
+                          break;
+                      case MotionEvent.ACTION_UP:
+                      case MotionEvent.ACTION_CANCEL:
+                          ballView.handleUp();
+                          break;
+                  }
               }
 
-              @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
+              @Override public void onAccessibilityEvent(AccessibilityEvent event) {}
+              @Override public void onInterrupt() {}
+
               @Override public void onDestroy() {
                   super.onDestroy();
-                  if (overlayView!=null) { overlayView.destroy(); if(drawAdded) wm.removeView(overlayView); }
-                  if (touchAdded) wm.removeView(detectView);
-                  instance=null;
+                  if (ballView != null) { ballView.destroy(); if (viewAdded) wm.removeView(ballView); }
+                  instance = null;
               }
-              @Override public IBinder onBind(Intent i) { return null; }
           }
           JEOF
 
@@ -487,7 +403,7 @@ jobs:
                           case MotionEvent.ACTION_MOVE: curX=e.getX();curY=e.getY();invalidate();return true;
                           case MotionEvent.ACTION_UP:
                               float r=(float)Math.hypot(curX-startX,curY-startY); r=Math.max(r,20f);
-                              OverlayService svc=OverlayService.getInstance();
+                              BallAccessibilityService svc=BallAccessibilityService.getInstance();
                               if(svc!=null) svc.addBall(startX,startY,r);
                               finish(); return true;
                       }
@@ -500,36 +416,33 @@ jobs:
           cat > app/src/main/java/com/example/balloverlay/MainActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.content.Intent;
-          import android.net.Uri;
-          import android.os.Build;
           import android.os.Bundle;
           import android.provider.Settings;
           import android.widget.Toast;
           import androidx.appcompat.app.AppCompatActivity;
           public class MainActivity extends AppCompatActivity {
-              private static final int REQ_PERM=1001;
               @Override protected void onCreate(Bundle s) {
                   super.onCreate(s);
                   setContentView(R.layout.activity_main);
-                  findViewById(R.id.btnSummon).setOnClickListener(v->onSummon());
-                  findViewById(R.id.btnClear).setOnClickListener(v->onClear());
+                  findViewById(R.id.btnSummon).setOnClickListener(v -> onSummon());
+                  findViewById(R.id.btnClear).setOnClickListener(v -> onClear());
               }
-              private void onSummon(){
-                  if(!hasPerm()){requestPerm();return;}
-                  startService(new Intent(this,OverlayService.class));
-                  startActivity(new Intent(this,SummonActivity.class));
+              private void onSummon() {
+                  if (!isAccessibilityEnabled()) {
+                      Toast.makeText(this,"請先在無障礙設定中開啟「球體召喚器」",Toast.LENGTH_LONG).show();
+                      startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                      return;
+                  }
+                  startActivity(new Intent(this, SummonActivity.class));
                   moveTaskToBack(true);
               }
-              private void onClear(){
-                  OverlayService svc=OverlayService.getInstance();
-                  if(svc!=null) svc.clearBalls();
-                  Toast.makeText(this,"已刪除所有物體",Toast.LENGTH_SHORT).show();
+              private void onClear() {
+                  BallAccessibilityService svc=BallAccessibilityService.getInstance();
+                  if(svc!=null) { svc.clearBalls(); Toast.makeText(this,"已刪除所有物體",Toast.LENGTH_SHORT).show(); }
+                  else Toast.makeText(this,"請先開啟無障礙服務",Toast.LENGTH_SHORT).show();
               }
-              private boolean hasPerm(){return Build.VERSION.SDK_INT<Build.VERSION_CODES.M||Settings.canDrawOverlays(this);}
-              private void requestPerm(){startActivityForResult(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:"+getPackageName())),REQ_PERM);}
-              @Override protected void onActivityResult(int req,int res,Intent data){
-                  super.onActivityResult(req,res,data);
-                  if(req==REQ_PERM&&!hasPerm()) Toast.makeText(this,"需要「顯示在其他應用程式上方」的權限",Toast.LENGTH_LONG).show();
+              private boolean isAccessibilityEnabled() {
+                  return BallAccessibilityService.getInstance() != null;
               }
           }
           JEOF
@@ -542,10 +455,15 @@ jobs:
               android:orientation="vertical" android:background="#1A1A2E" android:gravity="center">
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
                   android:text="球體召喚器" android:textColor="#FFFFFF"
-                  android:textSize="28sp" android:textStyle="bold" android:layout_marginBottom="12dp"/>
+                  android:textSize="28sp" android:textStyle="bold" android:layout_marginBottom="8dp"/>
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                  android:text="球會顯示在所有應用程式上方" android:textColor="#90A4AE"
-                  android:textSize="14sp" android:layout_marginBottom="48dp"/>
+                  android:text="首次使用：請開啟無障礙服務" android:textColor="#FFB300"
+                  android:textSize="14sp" android:layout_marginBottom="8dp"/>
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="設定 → 無障礙 → 已下載應用程式 → 球體召喚器 → 開啟"
+                  android:textColor="#90A4AE" android:textSize="12sp"
+                  android:gravity="center" android:layout_marginBottom="40dp"
+                  android:paddingLeft="24dp" android:paddingRight="24dp"/>
               <Button android:id="@+id/btnSummon"
                   android:layout_width="260dp" android:layout_height="64dp"
                   android:text="召喚球" android:textSize="18sp" android:textColor="#FFFFFF"
@@ -563,7 +481,10 @@ jobs:
           mkdir -p app/src/main/res/values
           cat > app/src/main/res/values/strings.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
-          <resources><string name="app_name">球體召喚器</string></resources>
+          <resources>
+              <string name="app_name">球體召喚器</string>
+              <string name="accessibility_description">允許球體召喚器在螢幕上顯示互動球體，不會攔截您的操作</string>
+          </resources>
           EOF
 
           cat > app/src/main/res/values/themes.xml << 'EOF'
