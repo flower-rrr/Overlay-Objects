@@ -298,48 +298,196 @@ jobs:
                       }
                   }
               }
+          # 替換 app/src/main/java/com/example/balloverlay/OverlayService.java
+          cat > app/src/main/java/com/example/balloverlay/OverlayService.java << 'JEOF'
+          package com.example.balloverlay;
 
-              // 每個球的觸控 View：大小 = 球直徑，透明，只處理拖曳
+          import android.annotation.SuppressLint;
+          import android.app.*;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.graphics.*;
+          import android.os.*;
+          import android.util.DisplayMetrics;
+          import android.view.*;
+          import androidx.core.app.NotificationCompat;
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class OverlayService extends Service implements Choreographer.FrameCallback {
+              private static OverlayService instance;
+              private WindowManager wm;
+              private int screenW, screenH, overlayType;
+
+              // 物理與幾何狀態
+              private final List<Ball> balls = new ArrayList<>();
+              private final PhysicsEngine physics = new PhysicsEngine(1, 1);
+              private long lastTime = 0;
+
+              // 視覺層與互動層
+              private DrawView drawView;
+              private boolean isDrawing = false;
+              private final List<BallTouchView> touchViews = new ArrayList<>();
+
+              public static OverlayService getInstance() { return instance; }
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  instance = this;
+                  wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  DisplayMetrics dm = new DisplayMetrics();
+                  wm.getDefaultDisplay().getRealMetrics(dm);
+                  screenW = dm.widthPixels;
+                  screenH = dm.heightPixels;
+                  physics.setScreen(screenW, screenH);
+                  
+                  overlayType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                      ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                      : WindowManager.LayoutParams.TYPE_PHONE;
+                  
+                  drawView = new DrawView(this);
+                  startForeground(1, buildNotification());
+                  
+                  // 使用 Choreographer 替代 Handler，畫面更新更絲滑
+                  Choreographer.getInstance().postFrameCallback(this);
+              }
+
+              @Override
+              public void doFrame(long frameTimeNanos) {
+                  if (lastTime == 0) lastTime = frameTimeNanos;
+                  float dt = Math.min((frameTimeNanos - lastTime) / 1_000_000_000f, 0.05f);
+                  lastTime = frameTimeNanos;
+
+                  physics.step(balls, dt);
+
+                  // 同步物理座標到觸控 Window
+                  for (int i = 0; i < balls.size() && i < touchViews.size(); i++) {
+                      touchViews.get(i).syncPosition();
+                  }
+
+                  if (isDrawing) drawView.invalidate();
+                  Choreographer.getInstance().postFrameCallback(this);
+              }
+
+              public void addBall(float x, float y, float r) {
+                  Ball b = new Ball(x, y, r);
+                  balls.add(b);
+
+                  if (!isDrawing) {
+                      WindowManager.LayoutParams dp = new WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+                          overlayType,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                          | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                          | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          PixelFormat.TRANSLUCENT);
+                      wm.addView(drawView, dp);
+                      isDrawing = true;
+                  }
+
+                  BallTouchView tv = new BallTouchView(this, b);
+                  touchViews.add(tv);
+                  
+                  int size = (int) (r * 2);
+                  WindowManager.LayoutParams tp = new WindowManager.LayoutParams(
+                      size, size, overlayType,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                      | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT);
+                  tp.gravity = Gravity.TOP | Gravity.LEFT;
+                  tv.layoutParams = tp;
+                  tv.syncPosition(); // 初始化位置
+                  wm.addView(tv, tp);
+              }
+
+              public void clearBalls() {
+                  balls.clear();
+                  for (BallTouchView tv : touchViews) {
+                      try { wm.removeView(tv); } catch (Exception ignored) {}
+                  }
+                  touchViews.clear();
+                  if (isDrawing) { 
+                      wm.removeView(drawView); 
+                      isDrawing = false; 
+                  }
+              }
+
+              // 全螢幕繪製層
+              @SuppressLint("ViewConstructor")
+              class DrawView extends View {
+                  private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  DrawView(Context ctx) { super(ctx); }
+                  
+                  @Override 
+                  protected void onDraw(Canvas canvas) {
+                      for (Ball b : balls) {
+                          p.setColor(b.color);
+                          canvas.drawCircle(b.x, b.y, b.radius, p);
+                          // 簡化了光影計算，讓渲染更直接快速
+                          p.setColor(0x55FFFFFF);
+                          canvas.drawCircle(b.x - b.radius * 0.3f, b.y - b.radius * 0.3f, b.radius * 0.25f, p);
+                      }
+                  }
+              }
+
+              // 獨立觸控層
               @SuppressLint("ViewConstructor")
               class BallTouchView extends View {
-                  private Ball ball;
-                  private WindowManager.LayoutParams params;
-                  private static final float FORCE = 40f;
+                  private final Ball ball;
+                  WindowManager.LayoutParams layoutParams;
+                  private int lastX = -1, lastY = -1; // 紀錄上次整數座標，減少無效更新
+
                   BallTouchView(Context ctx, Ball b) {
-                      super(ctx); this.ball=b;
-                      setBackgroundColor(Color.TRANSPARENT);
+                      super(ctx); 
+                      this.ball = b;
                   }
-                  void setParams(WindowManager.LayoutParams p) { this.params=p; }
-                  void updatePosition(Ball b) {
-                      if (params==null || b.isDragging) return;
-                      int size=(int)(b.radius*2)+4;
-                      params.width=size; params.height=size;
-                      params.x=(int)(b.x-b.radius)-2;
-                      params.y=(int)(b.y-b.radius)-2;
-                      try { wm.updateViewLayout(this, params); } catch(Exception ignored){}
+
+                  void syncPosition() {
+                      if (layoutParams == null || ball.isDragging) return;
+                      int newX = (int) (ball.x - ball.radius);
+                      int newY = (int) (ball.y - ball.radius);
+                      
+                      // 只有當整數像素發生改變時才更新 Window，大幅節省系統資源
+                      if (newX != lastX || newY != lastY) {
+                          layoutParams.x = newX;
+                          layoutParams.y = newY;
+                          lastX = newX;
+                          lastY = newY;
+                          try { wm.updateViewLayout(this, layoutParams); } catch(Exception ignored){}
+                      }
                   }
-                  @Override public boolean onTouchEvent(MotionEvent e) {
-                      // 座標是相對於這個小 View 的，需轉成螢幕座標
-                      float sx = params.x + e.getX();
-                      float sy = params.y + e.getY();
+
+                  @Override 
+                  public boolean onTouchEvent(MotionEvent e) {
+                      // 使用 getRawX/Y 可以避免拖曳時座標系偏移的問題
+                      float rawX = e.getRawX();
+                      float rawY = e.getRawY();
+
                       switch(e.getAction()) {
                           case MotionEvent.ACTION_DOWN:
-                              ball.isDragging=true;
-                              ball.dragLastX=sx; ball.dragLastY=sy;
+                              ball.isDragging = true;
+                              ball.dragLastX = rawX; 
+                              ball.dragLastY = rawY;
                               return true;
                           case MotionEvent.ACTION_MOVE:
-                              float ddx=sx-ball.dragLastX, ddy=sy-ball.dragLastY;
-                              ball.vx+=ddx*FORCE; ball.vy+=ddy*FORCE;
-                              ball.x=sx; ball.y=sy;
-                              ball.dragLastX=sx; ball.dragLastY=sy;
-                              // 拖曳時直接移動 Window
-                              params.x=(int)(sx-ball.radius)-2;
-                              params.y=(int)(sy-ball.radius)-2;
-                              try { wm.updateViewLayout(this, params); } catch(Exception ignored){}
+                              float dx = rawX - ball.dragLastX;
+                              float dy = rawY - ball.dragLastY;
+                              // 將位移轉換為動能
+                              ball.vx += dx * 10f; 
+                              ball.vy += dy * 10f;
+                              ball.x += dx; 
+                              ball.y += dy;
+                              ball.dragLastX = rawX; 
+                              ball.dragLastY = rawY;
+                              
+                              layoutParams.x = (int) (ball.x - ball.radius);
+                          layoutParams.y = (int) (ball.y - ball.radius);
+                              try { wm.updateViewLayout(this, layoutParams); } catch(Exception ignored){}
                               return true;
                           case MotionEvent.ACTION_UP:
                           case MotionEvent.ACTION_CANCEL:
-                              ball.isDragging=false;
+                              ball.isDragging = false;
                               return true;
                       }
                       return false;
@@ -347,22 +495,30 @@ jobs:
               }
 
               private Notification buildNotification() {
-                  String ch="ball_ch";
-                  if (Build.VERSION.SDK_INT>=Build.VERSION_CODES.O)
-                      ((NotificationManager)getSystemService(NOTIFICATION_SERVICE))
-                          .createNotificationChannel(new NotificationChannel(ch,"球體",NotificationManager.IMPORTANCE_LOW));
-                  PendingIntent pi=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE);
-                  return new NotificationCompat.Builder(this,ch)
-                      .setContentTitle("球體召喚器").setContentText("點擊返回主選單")
-                      .setSmallIcon(android.R.drawable.ic_dialog_info).setContentIntent(pi).build();
+                  String ch = "ball_ch";
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel channel = new NotificationChannel(ch, "球體", NotificationManager.IMPORTANCE_LOW);
+                      ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(channel);
+                  }
+                  PendingIntent pi = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+                  return new NotificationCompat.Builder(this, ch)
+                      .setContentTitle("球體物理引擎執行中")
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .setContentIntent(pi)
+                      .build();
               }
+
               @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
               @Override public void onDestroy() {
-                  super.onDestroy(); clearBalls(); instance=null;
+                  super.onDestroy(); 
+                  Choreographer.getInstance().removeFrameCallback(this);
+                  clearBalls(); 
+                  instance = null;
               }
               @Override public IBinder onBind(Intent i) { return null; }
           }
           JEOF
+
 
           cat > app/src/main/java/com/example/balloverlay/SummonActivity.java << 'JEOF'
           package com.example.balloverlay;
