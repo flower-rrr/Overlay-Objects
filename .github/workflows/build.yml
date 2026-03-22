@@ -49,8 +49,8 @@ jobs:
                   applicationId "com.example.balloverlay"
                   minSdk 24
                   targetSdk 34
-                  versionCode 9
-                  versionName "9.0"
+                  versionCode 10
+                  versionName "10.0"
               }
               signingConfigs {
                   release {
@@ -107,37 +107,54 @@ jobs:
 
           mkdir -p app/src/main/java/com/example/balloverlay
 
-          # PhysBody.java — 統一的物理物體基類
           cat > app/src/main/java/com/example/balloverlay/PhysBody.java << 'JEOF'
           package com.example.balloverlay;
           public class PhysBody {
               public static final int TYPE_BALL = 0;
               public static final int TYPE_BOX  = 1;
               public int type;
-              public float x, y;       // 中心
-              public float vx, vy;
-              public float size;       // 球:半徑  箱:半邊長
+              public float x, y, vx, vy, size;
+              public int color;
               public boolean isDragging = false;
               public float dragLastX, dragLastY;
-              public boolean dead = false; // 箱子解體用
-              public PhysBody(int type, float x, float y, float size) {
-                  this.type=type; this.x=x; this.y=y; this.size=size;
+              public boolean dead = false;
+              public PhysBody(int type, float x, float y, float size, int color) {
+                  this.type=type; this.x=x; this.y=y; this.size=size; this.color=color;
               }
           }
           JEOF
 
-          # PhysicsEngine.java — 支援球和箱子，球與球彈開，箱子撞擊解體
+          # 碎片類
+          cat > app/src/main/java/com/example/balloverlay/Shard.java << 'JEOF'
+          package com.example.balloverlay;
+          public class Shard {
+              public float x, y, vx, vy;
+              public float w, h;     // 木板寬高
+              public float rot;      // 旋轉角度 (deg)
+              public float rotV;     // 旋轉速度
+              public int color;
+              public boolean gone = false; // 飛出畫面後標記
+              public Shard(float x, float y, float vx, float vy, float w, float h, float rot, float rotV, int color) {
+                  this.x=x; this.y=y; this.vx=vx; this.vy=vy;
+                  this.w=w; this.h=h; this.rot=rot; this.rotV=rotV; this.color=color;
+              }
+          }
+          JEOF
+
           cat > app/src/main/java/com/example/balloverlay/PhysicsEngine.java << 'JEOF'
           package com.example.balloverlay;
           import java.util.List;
           public class PhysicsEngine {
-              private static final float GRAVITY  = 1200f;
-              private static final float DAMPING  = 0.60f;
-              private static final float FRICTION = 0.98f;
-              private static final float SLEEP    = 5f;
-              // 箱子解體閾值（衝擊速度）
-              private static final float BOX_BREAK_VEL = 3500f;
+              private static final float GRAVITY   = 1200f;
+              private static final float DAMPING   = 0.55f;  // 箱子不那麼彈
+              private static final float BALL_DAMP = 0.65f;  // 球正常彈
+              private static final float FRICTION  = 0.98f;
+              private static final float SLEEP     = 8f;
+              public static final  float BOX_BREAK = 2800f;  // 箱子解體閾值
               private int W, H;
+              // 碎片重力
+              private static final float SHARD_GRAVITY = 2000f;
+
               public PhysicsEngine(int w, int h) { W=w; H=h; }
               public void setScreen(int w, int h) { W=w; H=h; }
 
@@ -148,13 +165,12 @@ jobs:
                       b.vx *= FRICTION;
                       b.x  += b.vx * dt;
                       b.y  += b.vy * dt;
-                      wallCollide(b);
+                      wallBounce(b);
                   }
-                  // 物體間碰撞
-                  for (int i = 0; i < bodies.size(); i++) {
+                  for (int i=0; i<bodies.size(); i++) {
                       PhysBody a = bodies.get(i);
                       if (a.dead) continue;
-                      for (int j = i+1; j < bodies.size(); j++) {
+                      for (int j=i+1; j<bodies.size(); j++) {
                           PhysBody b = bodies.get(j);
                           if (b.dead) continue;
                           collide(a, b);
@@ -162,68 +178,58 @@ jobs:
                   }
               }
 
-              private void wallCollide(PhysBody b) {
-                  float s = b.size;
-                  if (b.x - s < 0)  { b.x = s;   bounce(b, true,  true);  }
-                  if (b.x + s > W)  { b.x = W-s;  bounce(b, true,  false); }
-                  if (b.y - s < 0)  { b.y = s;    bounce(b, false, true);  }
-                  if (b.y + s > H)  {
-                      float impact = Math.abs(b.vy);
-                      b.y = H - s;
-                      if (b.type == PhysBody.TYPE_BOX && impact > BOX_BREAK_VEL) {
-                          b.dead = true; return;
-                      }
-                      b.vy = -impact * DAMPING;
-                      if (Math.abs(b.vy) < SLEEP) { b.vy = 0; b.vx *= 0.85f; }
+              public void stepShards(List<Shard> shards, float dt, int screenW, int screenH) {
+                  for (Shard s : shards) {
+                      if (s.gone) continue;
+                      s.vy += SHARD_GRAVITY * dt;
+                      s.x  += s.vx * dt;
+                      s.y  += s.vy * dt;
+                      s.rot += s.rotV * dt;
+                      // 飛出畫面就標記刪除
+                      if (s.x < -300 || s.x > screenW+300 || s.y > screenH+300) s.gone = true;
                   }
               }
 
-              private void bounce(PhysBody b, boolean xAxis, boolean positive) {
-                  if (xAxis) b.vx = positive ?  Math.abs(b.vx)*DAMPING : -Math.abs(b.vx)*DAMPING;
-                  else       b.vy = positive ?  Math.abs(b.vy)*DAMPING : -Math.abs(b.vy)*DAMPING;
+              private void wallBounce(PhysBody b) {
+                  float damp = b.type==PhysBody.TYPE_BALL ? BALL_DAMP : DAMPING;
+                  if (b.x-b.size < 0)  { b.x=b.size;   b.vx= Math.abs(b.vx)*damp; }
+                  if (b.x+b.size > W)  { b.x=W-b.size; b.vx=-Math.abs(b.vx)*damp; }
+                  if (b.y-b.size < 0)  { b.y=b.size;   b.vy= Math.abs(b.vy)*damp; }
+                  if (b.y+b.size > H)  {
+                      float impact = Math.abs(b.vy);
+                      b.y = H - b.size;
+                      if (b.type==PhysBody.TYPE_BOX && impact > BOX_BREAK) { b.dead=true; return; }
+                      b.vy = -impact * damp;
+                      if (Math.abs(b.vy) < SLEEP) { b.vy=0; b.vx*=0.85f; }
+                  }
               }
 
               private void collide(PhysBody a, PhysBody b) {
-                  float dx = b.x - a.x, dy = b.y - a.y;
-                  float dist = (float) Math.sqrt(dx*dx + dy*dy);
-                  float minD;
-                  if (a.type==PhysBody.TYPE_BALL && b.type==PhysBody.TYPE_BALL)
-                      minD = a.size + b.size;
-                  else if (a.type==PhysBody.TYPE_BOX && b.type==PhysBody.TYPE_BOX)
-                      minD = (a.size + b.size) * 1.0f; // AABB 近似
-                  else
-                      minD = a.size + b.size; // 球+箱 近似圓碰撞
-
+                  float dx=b.x-a.x, dy=b.y-a.y;
+                  float dist=(float)Math.sqrt(dx*dx+dy*dy);
+                  float minD = a.size + b.size;
                   if (dist >= minD || dist < 0.01f) return;
-
-                  float nx = dx/dist, ny = dy/dist;
-                  float overlap = minD - dist;
-
-                  // 推開
-                  if (!a.isDragging) { a.x -= nx * overlap * 0.5f; a.y -= ny * overlap * 0.5f; }
-                  if (!b.isDragging) { b.x += nx * overlap * 0.5f; b.y += ny * overlap * 0.5f; }
-
-                  // 速度交換（彈性碰撞）
-                  float dvx = b.vx - a.vx, dvy = b.vy - a.vy;
-                  float dot = dvx*nx + dvy*ny;
-                  if (dot >= 0) return;
-
-                  float impulse = dot * DAMPING;
-                  float impactSpeed = (float)Math.sqrt(dvx*dvx+dvy*dvy);
-
-                  if (!a.isDragging) { a.vx += impulse*nx; a.vy += impulse*ny; }
-                  if (!b.isDragging) { b.vx -= impulse*nx; b.vy -= impulse*ny; }
-
-                  // 箱子被撞擊解體
-                  if (impactSpeed > BOX_BREAK_VEL) {
-                      if (b.type == PhysBody.TYPE_BOX) b.dead = true;
-                      if (a.type == PhysBody.TYPE_BOX) a.dead = true;
+                  float nx=dx/dist, ny=dy/dist;
+                  float overlap=minD-dist;
+                  if (!a.isDragging) { a.x-=nx*overlap*0.5f; a.y-=ny*overlap*0.5f; }
+                  if (!b.isDragging) { b.x+=nx*overlap*0.5f; b.y+=ny*overlap*0.5f; }
+                  float dvx=b.vx-a.vx, dvy=b.vy-a.vy;
+                  float dot=dvx*nx+dvy*ny;
+                  if (dot>=0) return;
+                  float damp = (a.type==PhysBody.TYPE_BALL&&b.type==PhysBody.TYPE_BALL) ? BALL_DAMP : DAMPING;
+                  float impulse = dot * damp;
+                  float speed = (float)Math.sqrt(dvx*dvx+dvy*dvy);
+                  if (!a.isDragging) { a.vx+=impulse*nx; a.vy+=impulse*ny; }
+                  if (!b.isDragging) { b.vx-=impulse*nx; b.vy-=impulse*ny; }
+                  // 箱子被猛烈撞擊解體
+                  if (speed > BOX_BREAK) {
+                      if (b.type==PhysBody.TYPE_BOX) b.dead=true;
+                      if (a.type==PhysBody.TYPE_BOX) a.dead=true;
                   }
               }
           }
           JEOF
 
-          # OverlayService.java
           cat > app/src/main/java/com/example/balloverlay/OverlayService.java << 'JEOF'
           package com.example.balloverlay;
 
@@ -232,14 +238,11 @@ jobs:
           import android.content.Context;
           import android.content.Intent;
           import android.graphics.*;
-          import android.graphics.Color;
           import android.os.*;
           import android.util.DisplayMetrics;
           import android.view.*;
           import androidx.core.app.NotificationCompat;
-          import java.util.ArrayList;
-          import java.util.List;
-          import java.util.Random;
+          import java.util.*;
 
           public class OverlayService extends Service implements Choreographer.FrameCallback {
               private static OverlayService instance;
@@ -247,7 +250,8 @@ jobs:
               private int screenW, screenH, overlayType;
 
               private final List<PhysBody> bodies = new ArrayList<>();
-              private final PhysicsEngine physics = new PhysicsEngine(1, 1);
+              private final List<Shard>    shards = new ArrayList<>();
+              private final PhysicsEngine  physics = new PhysicsEngine(1,1);
               private long lastTime = 0;
 
               private DrawView drawView;
@@ -265,206 +269,230 @@ jobs:
               public static OverlayService getInstance() { return instance; }
 
               @Override public void onCreate() {
-                  super.onCreate(); instance = this;
-                  wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-                  DisplayMetrics dm = new DisplayMetrics();
-                  wm.getDefaultDisplay().getRealMetrics(dm);
-                  screenW = dm.widthPixels; screenH = dm.heightPixels;
-                  physics.setScreen(screenW, screenH);
-                  overlayType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                  super.onCreate(); instance=this;
+                  wm=(WindowManager)getSystemService(WINDOW_SERVICE);
+                  DisplayMetrics dm=new DisplayMetrics(); wm.getDefaultDisplay().getRealMetrics(dm);
+                  screenW=dm.widthPixels; screenH=dm.heightPixels;
+                  physics.setScreen(screenW,screenH);
+                  overlayType=Build.VERSION.SDK_INT>=Build.VERSION_CODES.O
                       ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                       : WindowManager.LayoutParams.TYPE_PHONE;
-                  drawView = new DrawView(this);
-                  startForeground(1, buildNotification());
+                  drawView=new DrawView(this);
+                  startForeground(1,buildNotification());
                   Choreographer.getInstance().postFrameCallback(this);
               }
 
               @Override public void doFrame(long frameTimeNanos) {
-                  if (lastTime == 0) lastTime = frameTimeNanos;
-                  float dt = Math.min((frameTimeNanos - lastTime) / 1_000_000_000f, 0.05f);
-                  lastTime = frameTimeNanos;
-                  physics.step(bodies, dt);
-                  // 移除死亡箱子的觸控 View
-                  for (int i = bodies.size()-1; i >= 0; i--) {
-                      if (bodies.get(i).dead) {
+                  if (lastTime==0) lastTime=frameTimeNanos;
+                  float dt=Math.min((frameTimeNanos-lastTime)/1_000_000_000f,0.05f);
+                  lastTime=frameTimeNanos;
+
+                  physics.step(bodies,dt);
+                  physics.stepShards(shards,dt,screenW,screenH);
+
+                  // 處理剛死亡的箱子：產生碎片
+                  for (int i=bodies.size()-1; i>=0; i--) {
+                      PhysBody b=bodies.get(i);
+                      if (b.dead && b.type==PhysBody.TYPE_BOX) {
+                          spawnShards(b);
+                          removeBodyAt(i);
+                      } else if (b.dead) {
                           removeBodyAt(i);
                       }
                   }
-                  for (int i = 0; i < bodies.size() && i < touchViews.size(); i++)
+                  // 清除飛出畫面的碎片
+                  for (int i=shards.size()-1; i>=0; i--)
+                      if (shards.get(i).gone) shards.remove(i);
+
+                  for (int i=0; i<bodies.size()&&i<touchViews.size(); i++)
                       touchViews.get(i).syncPosition();
+
                   if (isDrawing) drawView.invalidate();
                   Choreographer.getInstance().postFrameCallback(this);
               }
 
+              private void spawnShards(PhysBody box) {
+                  float s=box.size;
+                  int darkColor=darken(box.color);
+                  // 產生 6 塊木板碎片
+                  for (int i=0; i<6; i++) {
+                      float angle=(float)(rnd.nextFloat()*Math.PI*2);
+                      float speed=800f+rnd.nextFloat()*1200f;
+                      float vx=(float)Math.cos(angle)*speed + box.vx*0.5f;
+                      float vy=(float)Math.sin(angle)*speed + box.vy*0.5f - 400f;
+                      float w=s*(0.4f+rnd.nextFloat()*0.6f);
+                      float h=s*(0.15f+rnd.nextFloat()*0.2f);
+                      float rotV=(rnd.nextFloat()-0.5f)*720f;
+                      float ox=(rnd.nextFloat()-0.5f)*s;
+                      float oy=(rnd.nextFloat()-0.5f)*s;
+                      shards.add(new Shard(box.x+ox, box.y+oy, vx, vy, w, h, rnd.nextFloat()*360f, rotV,
+                          i%2==0?box.color:darkColor));
+                  }
+              }
+
+              private int darken(int c) {
+                  return Color.rgb((int)(Color.red(c)*0.6f),(int)(Color.green(c)*0.6f),(int)(Color.blue(c)*0.6f));
+              }
+
               private void removeBodyAt(int i) {
                   bodies.remove(i);
-                  if (i < touchViews.size()) {
-                      try { wm.removeView(touchViews.get(i)); } catch (Exception ignored) {}
+                  if (i<touchViews.size()) {
+                      try { wm.removeView(touchViews.get(i)); } catch(Exception ignored){}
                       touchViews.remove(i);
                   }
-                  if (bodies.isEmpty() && isDrawing) { wm.removeView(drawView); isDrawing = false; }
+                  if (bodies.isEmpty()&&shards.isEmpty()&&isDrawing) { wm.removeView(drawView); isDrawing=false; }
               }
 
               private void ensureDrawView() {
                   if (!isDrawing) {
-                      WindowManager.LayoutParams dp = new WindowManager.LayoutParams(
+                      WindowManager.LayoutParams dp=new WindowManager.LayoutParams(
                           WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                           overlayType,
                           WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                          | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                          | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          |WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                          |WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                           PixelFormat.TRANSLUCENT);
-                      wm.addView(drawView, dp);
-                      isDrawing = true;
+                      wm.addView(drawView,dp); isDrawing=true;
                   }
               }
 
               public void addBall(float x, float y, float r) {
-                  PhysBody b = new PhysBody(PhysBody.TYPE_BALL, x, y, r);
-                  b.vx = 0; b.vy = 0;
-                  // 隨機顏色存在 dead 欄位暫借用 — 改用自訂欄位
-                  addBody(b, BALL_COLORS[rnd.nextInt(BALL_COLORS.length)], (int)(r*2), (int)(r*2));
+                  int col=BALL_COLORS[rnd.nextInt(BALL_COLORS.length)];
+                  PhysBody b=new PhysBody(PhysBody.TYPE_BALL,x,y,r,col);
+                  addBody(b,(int)(r*2),(int)(r*2));
               }
 
-              public void addBox(float x, float y, float halfSize) {
-                  PhysBody b = new PhysBody(PhysBody.TYPE_BOX, x, y, halfSize);
-                  addBody(b, Color.parseColor("#8D6E63"), (int)(halfSize*2), (int)(halfSize*2));
+              public void addBox(float x, float y, float half) {
+                  int col=Color.parseColor("#8D6E63");
+                  PhysBody b=new PhysBody(PhysBody.TYPE_BOX,x,y,half,col);
+                  addBody(b,(int)(half*2),(int)(half*2));
               }
 
-              private void addBody(PhysBody b, int color, int w, int h) {
-                  bodies.add(b);
-                  ensureDrawView();
-                  BodyTouchView tv = new BodyTouchView(this, b, color);
+              private void addBody(PhysBody b, int w, int h) {
+                  bodies.add(b); ensureDrawView();
+                  BodyTouchView tv=new BodyTouchView(this,b);
                   touchViews.add(tv);
-                  WindowManager.LayoutParams tp = new WindowManager.LayoutParams(
-                      w, h, overlayType,
+                  WindowManager.LayoutParams tp=new WindowManager.LayoutParams(
+                      w,h,overlayType,
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                      | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      |WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                       PixelFormat.TRANSLUCENT);
-                  tp.gravity = Gravity.TOP | Gravity.LEFT;
-                  tp.x = (int)(b.x - b.size);
-                  tp.y = (int)(b.y - b.size);
-                  tv.layoutParams = tp;
-                  wm.addView(tv, tp);
+                  tp.gravity=Gravity.TOP|Gravity.LEFT;
+                  tp.x=(int)(b.x-b.size); tp.y=(int)(b.y-b.size);
+                  tv.layoutParams=tp;
+                  wm.addView(tv,tp);
               }
 
               public void clearAll() {
-                  bodies.clear();
-                  for (BodyTouchView tv : touchViews) {
-                      try { wm.removeView(tv); } catch (Exception ignored) {}
-                  }
+                  bodies.clear(); shards.clear();
+                  for (BodyTouchView tv:touchViews) { try{wm.removeView(tv);}catch(Exception ignored){} }
                   touchViews.clear();
-                  if (isDrawing) { wm.removeView(drawView); isDrawing = false; }
+                  if (isDrawing) { wm.removeView(drawView); isDrawing=false; }
               }
 
-              // 繪製層
+              // 繪製層：每幀必須清除背景再重繪
               @SuppressLint("ViewConstructor")
               class DrawView extends View {
-                  private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  private final Paint boxPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  private final Paint woodPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  DrawView(Context ctx) {
-                      super(ctx);
-                      boxPaint.setColor(Color.parseColor("#8D6E63"));
-                      woodPaint.setColor(Color.parseColor("#5D4037"));
-                      woodPaint.setStyle(Paint.Style.STROKE);
-                      woodPaint.setStrokeWidth(3f);
-                  }
+                  private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint shardPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
+                  DrawView(Context ctx) { super(ctx); setBackgroundColor(Color.TRANSPARENT); }
+
                   @Override protected void onDraw(Canvas canvas) {
-                      for (int i = 0; i < bodies.size() && i < touchViews.size(); i++) {
-                          PhysBody b = bodies.get(i);
+                      // 清除上一幀（透明背景）
+                      canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+
+                      // 畫球和箱子
+                      for (int i=0; i<bodies.size()&&i<touchViews.size(); i++) {
+                          PhysBody b=bodies.get(i);
                           if (b.dead) continue;
-                          int col = touchViews.get(i).color;
-                          if (b.type == PhysBody.TYPE_BALL) {
-                              int light = Color.rgb(Math.min(255,Color.red(col)+80),Math.min(255,Color.green(col)+80),Math.min(255,Color.blue(col)+80));
+                          if (b.type==PhysBody.TYPE_BALL) {
+                              int col=b.color;
+                              int light=Color.rgb(Math.min(255,Color.red(col)+80),Math.min(255,Color.green(col)+80),Math.min(255,Color.blue(col)+80));
                               p.setShader(new RadialGradient(b.x-b.size*.3f,b.y-b.size*.3f,b.size,light,col,Shader.TileMode.CLAMP));
-                              canvas.drawCircle(b.x, b.y, b.size, p);
-                              p.setShader(null); p.setColor(0x55FFFFFF);
-                              canvas.drawCircle(b.x-b.size*.3f, b.y-b.size*.3f, b.size*.25f, p);
+                              canvas.drawCircle(b.x,b.y,b.size,p);
+                              p.setShader(null); p.setColor(0x99FFFFFF);
+                              canvas.drawCircle(b.x-b.size*.28f,b.y-b.size*.28f,b.size*.22f,p);
                           } else {
-                              float s = b.size;
-                              RectF rect = new RectF(b.x-s, b.y-s, b.x+s, b.y+s);
-                              boxPaint.setColor(col);
-                              canvas.drawRoundRect(rect, 8, 8, boxPaint);
-                              // 木板紋路
-                              canvas.drawRoundRect(rect, 8, 8, woodPaint);
-                              canvas.drawLine(b.x-s+6, b.y, b.x+s-6, b.y, woodPaint);
-                              canvas.drawLine(b.x, b.y-s+6, b.x, b.y+s-6, woodPaint);
+                              float s=b.size;
+                              // 箱體
+                              p.setShader(null); p.setColor(b.color);
+                              canvas.drawRoundRect(new RectF(b.x-s,b.y-s,b.x+s,b.y+s),10,10,p);
+                              // 木紋
+                              p.setColor(darken(b.color)); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3f);
+                              canvas.drawRoundRect(new RectF(b.x-s+4,b.y-s+4,b.x+s-4,b.y+s-4),8,8,p);
+                              canvas.drawLine(b.x-s+6,b.y,b.x+s-6,b.y,p);
+                              canvas.drawLine(b.x,b.y-s+6,b.x,b.y+s-6,p);
+                              p.setStyle(Paint.Style.FILL);
                           }
+                      }
+
+                      // 畫碎片（旋轉木板）
+                      for (Shard s:shards) {
+                          if (s.gone) continue;
+                          canvas.save();
+                          canvas.translate(s.x,s.y);
+                          canvas.rotate(s.rot);
+                          shardPaint.setColor(s.color); shardPaint.setStyle(Paint.Style.FILL);
+                          canvas.drawRect(-s.w/2,-s.h/2,s.w/2,s.h/2,shardPaint);
+                          shardPaint.setColor(darken(s.color)); shardPaint.setStyle(Paint.Style.STROKE); shardPaint.setStrokeWidth(2f);
+                          canvas.drawRect(-s.w/2,-s.h/2,s.w/2,s.h/2,shardPaint);
+                          canvas.restore();
                       }
                   }
               }
 
-              // 觸控層
               @SuppressLint("ViewConstructor")
               class BodyTouchView extends View {
                   final PhysBody body;
                   WindowManager.LayoutParams layoutParams;
-                  int color;
-                  private int lastX = Integer.MIN_VALUE, lastY = Integer.MIN_VALUE;
-
-                  BodyTouchView(Context ctx, PhysBody b, int color) {
-                      super(ctx); this.body = b; this.color = color;
-                  }
-
+                  private int lastX=Integer.MIN_VALUE, lastY=Integer.MIN_VALUE;
+                  BodyTouchView(Context ctx, PhysBody b) { super(ctx); this.body=b; }
                   void syncPosition() {
-                      if (layoutParams == null || body.isDragging) return;
-                      int nx = (int)(body.x - body.size), ny = (int)(body.y - body.size);
-                      if (nx != lastX || ny != lastY) {
-                          layoutParams.x = nx; layoutParams.y = ny;
-                          lastX = nx; lastY = ny;
-                          try { wm.updateViewLayout(this, layoutParams); } catch(Exception ignored){}
+                      if (layoutParams==null||body.isDragging) return;
+                      int nx=(int)(body.x-body.size), ny=(int)(body.y-body.size);
+                      if (nx!=lastX||ny!=lastY) {
+                          layoutParams.x=nx; layoutParams.y=ny; lastX=nx; lastY=ny;
+                          try{wm.updateViewLayout(this,layoutParams);}catch(Exception ignored){}
                       }
                   }
-
                   @Override public boolean onTouchEvent(MotionEvent e) {
-                      float rawX = e.getRawX(), rawY = e.getRawY();
+                      float rawX=e.getRawX(), rawY=e.getRawY();
                       switch(e.getAction()) {
                           case MotionEvent.ACTION_DOWN:
-                              body.isDragging = true;
-                              body.vx = 0; body.vy = 0;
-                              body.dragLastX = rawX; body.dragLastY = rawY;
-                              return true;
+                              body.isDragging=true; body.vx=0; body.vy=0;
+                              body.dragLastX=rawX; body.dragLastY=rawY; return true;
                           case MotionEvent.ACTION_MOVE:
-                              float dx = rawX - body.dragLastX, dy = rawY - body.dragLastY;
-                              body.vx += dx * 10f; body.vy += dy * 10f;
-                              body.x += dx; body.y += dy;
-                              body.dragLastX = rawX; body.dragLastY = rawY;
-                              layoutParams.x = (int)(body.x - body.size);
-                              layoutParams.y = (int)(body.y - body.size);
-                              try { wm.updateViewLayout(this, layoutParams); } catch(Exception ignored){}
-                              return true;
-                          case MotionEvent.ACTION_UP:
-                          case MotionEvent.ACTION_CANCEL:
-                              body.isDragging = false;
-                              return true;
+                              float dx=rawX-body.dragLastX, dy=rawY-body.dragLastY;
+                              body.vx+=dx*10f; body.vy+=dy*10f;
+                              body.x+=dx; body.y+=dy;
+                              body.dragLastX=rawX; body.dragLastY=rawY;
+                              layoutParams.x=(int)(body.x-body.size); layoutParams.y=(int)(body.y-body.size);
+                              try{wm.updateViewLayout(this,layoutParams);}catch(Exception ignored){} return true;
+                          case MotionEvent.ACTION_UP: case MotionEvent.ACTION_CANCEL:
+                              body.isDragging=false; return true;
                       }
                       return false;
                   }
               }
 
               private Notification buildNotification() {
-                  String ch = "obj_ch";
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                  String ch="obj_ch";
+                  if (Build.VERSION.SDK_INT>=Build.VERSION_CODES.O)
                       ((NotificationManager)getSystemService(NOTIFICATION_SERVICE))
                           .createNotificationChannel(new NotificationChannel(ch,"物體產生器",NotificationManager.IMPORTANCE_LOW));
-                  PendingIntent pi = PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE);
+                  PendingIntent pi=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE);
                   return new NotificationCompat.Builder(this,ch)
                       .setContentTitle("物體產生器執行中").setContentText("點擊返回主選單")
                       .setSmallIcon(android.R.drawable.ic_dialog_info).setContentIntent(pi).build();
               }
-
               @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
               @Override public void onDestroy() {
-                  super.onDestroy();
-                  Choreographer.getInstance().removeFrameCallback(this);
-                  clearAll(); instance = null;
+                  super.onDestroy(); Choreographer.getInstance().removeFrameCallback(this); clearAll(); instance=null;
               }
               @Override public IBinder onBind(Intent i) { return null; }
           }
           JEOF
 
-          # SummonActivity.java — 加入召喚箱子選項
           cat > app/src/main/java/com/example/balloverlay/SummonActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
@@ -473,57 +501,48 @@ jobs:
           import android.os.Bundle;
           import android.view.*;
           public class SummonActivity extends Activity {
-              private float startX=-1, startY=-1, curX, curY;
-              private int mode = 0; // 0=ball 1=box  (從 Intent 傳入)
+              private float startX=-1,startY=-1,curX,curY;
+              private int mode=0;
               @Override protected void onCreate(Bundle s) {
-                  super.onCreate(s);
-                  mode = getIntent().getIntExtra("mode", 0);
+                  super.onCreate(s); mode=getIntent().getIntExtra("mode",0);
                   requestWindowFeature(Window.FEATURE_NO_TITLE);
-                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
                   setContentView(new DrawView(this));
               }
               @SuppressLint("ViewConstructor")
               class DrawView extends View {
-                  private final Paint bg=new Paint(), shape=new Paint(Paint.ANTI_ALIAS_FLAG),
-                                      hint=new Paint(Paint.ANTI_ALIAS_FLAG), line=new Paint(Paint.ANTI_ALIAS_FLAG);
-                  DrawView(SummonActivity c) {
+                  private final Paint bg=new Paint(),shape=new Paint(Paint.ANTI_ALIAS_FLAG),hint=new Paint(Paint.ANTI_ALIAS_FLAG),line=new Paint(Paint.ANTI_ALIAS_FLAG);
+                  DrawView(SummonActivity c){
                       super(c); bg.setColor(0xBB000000);
-                      shape.setColor(mode==0 ? 0x884FC3F7 : 0x88A1887F);
-                      shape.setStyle(Paint.Style.FILL);
+                      shape.setColor(mode==0?0xFF4FC3F7:0xFF8D6E63); shape.setStyle(Paint.Style.FILL); shape.setAlpha(140);
                       hint.setColor(Color.WHITE); hint.setTextSize(52f); hint.setTextAlign(Paint.Align.CENTER); hint.setAntiAlias(true);
                       line.setColor(Color.WHITE); line.setStrokeWidth(3f); line.setAntiAlias(true);
                   }
-                  @Override protected void onDraw(Canvas c) {
+                  @Override protected void onDraw(Canvas c){
                       c.drawRect(0,0,getWidth(),getHeight(),bg);
-                      String label = mode==0 ? "球" : "箱子";
-                      if (startX < 0) {
-                          c.drawText("點擊設定中心", getWidth()/2f, getHeight()/2f-30f, hint);
-                          c.drawText("拖曳決定"+label+"大小", getWidth()/2f, getHeight()/2f+50f, hint);
+                      String label=mode==0?"球":"箱子";
+                      if(startX<0){
+                          c.drawText("點擊設定中心",getWidth()/2f,getHeight()/2f-30f,hint);
+                          c.drawText("拖曳決定"+label+"大小",getWidth()/2f,getHeight()/2f+50f,hint);
                       } else {
-                          float r = (float)Math.hypot(curX-startX, curY-startY);
-                          if (mode == 0) {
-                              c.drawCircle(startX, startY, Math.max(r,10f), shape);
-                          } else {
-                              c.drawRect(startX-r, startY-r, startX+r, startY+r, shape);
-                          }
-                          c.drawLine(startX, startY, curX, curY, line);
+                          float r=(float)Math.hypot(curX-startX,curY-startY);
+                          if(mode==0) c.drawCircle(startX,startY,Math.max(r,10f),shape);
+                          else c.drawRect(startX-r,startY-r,startX+r,startY+r,shape);
+                          c.drawLine(startX,startY,curX,curY,line);
                           hint.setTextSize(40f);
-                          float ly = startY-r-24f; if(ly<60f) ly=startY+r+60f;
-                          c.drawText("大小: "+(int)r+"px", startX, ly, hint);
-                          c.drawText("放開召喚", getWidth()/2f, 80f, hint);
+                          float ly=startY-r-24f; if(ly<60f) ly=startY+r+60f;
+                          c.drawText("大小: "+(int)r+"px",startX,ly,hint);
+                          c.drawText("放開召喚",getWidth()/2f,80f,hint);
                       }
                   }
-                  @Override public boolean onTouchEvent(MotionEvent e) {
-                      switch(e.getAction()) {
-                          case MotionEvent.ACTION_DOWN: startX=e.getX(); startY=e.getY(); curX=startX; curY=startY; invalidate(); return true;
-                          case MotionEvent.ACTION_MOVE: curX=e.getX(); curY=e.getY(); invalidate(); return true;
+                  @Override public boolean onTouchEvent(MotionEvent e){
+                      switch(e.getAction()){
+                          case MotionEvent.ACTION_DOWN: startX=e.getX();startY=e.getY();curX=startX;curY=startY;invalidate();return true;
+                          case MotionEvent.ACTION_MOVE: curX=e.getX();curY=e.getY();invalidate();return true;
                           case MotionEvent.ACTION_UP:
-                              float r = (float)Math.hypot(curX-startX, curY-startY); r = Math.max(r, 20f);
-                              OverlayService svc = OverlayService.getInstance();
-                              if (svc != null) {
-                                  if (mode == 0) svc.addBall(startX, startY, r);
-                                  else svc.addBox(startX, startY, r);
-                              }
+                              float r=(float)Math.hypot(curX-startX,curY-startY); r=Math.max(r,20f);
+                              OverlayService svc=OverlayService.getInstance();
+                              if(svc!=null){if(mode==0)svc.addBall(startX,startY,r);else svc.addBox(startX,startY,r);}
                               finish(); return true;
                       }
                       return false;
@@ -532,7 +551,6 @@ jobs:
           }
           JEOF
 
-          # MainActivity.java
           cat > app/src/main/java/com/example/balloverlay/MainActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.content.Intent;
@@ -543,31 +561,29 @@ jobs:
           import android.widget.Toast;
           import androidx.appcompat.app.AppCompatActivity;
           public class MainActivity extends AppCompatActivity {
-              private static final int REQ_PERM = 1001;
+              private static final int REQ_PERM=1001;
               @Override protected void onCreate(Bundle s) {
                   super.onCreate(s); setContentView(R.layout.activity_main);
-                  findViewById(R.id.btnSummonBall).setOnClickListener(v -> onSummon(0));
-                  findViewById(R.id.btnSummonBox).setOnClickListener(v -> onSummon(1));
-                  findViewById(R.id.btnClear).setOnClickListener(v -> onClear());
+                  findViewById(R.id.btnSummonBall).setOnClickListener(v->onSummon(0));
+                  findViewById(R.id.btnSummonBox).setOnClickListener(v->onSummon(1));
+                  findViewById(R.id.btnClear).setOnClickListener(v->onClear());
               }
-              private void onSummon(int mode) {
-                  if (!hasPerm()) { requestPerm(); return; }
-                  startService(new Intent(this, OverlayService.class));
-                  Intent i = new Intent(this, SummonActivity.class);
-                  i.putExtra("mode", mode);
+              private void onSummon(int mode){
+                  if(!hasPerm()){requestPerm();return;}
+                  startService(new Intent(this,OverlayService.class));
+                  Intent i=new Intent(this,SummonActivity.class); i.putExtra("mode",mode);
                   startActivity(i);
-                  // 不 moveTaskToBack，讓使用者停留在 MainActivity
               }
-              private void onClear() {
-                  OverlayService svc = OverlayService.getInstance();
-                  if (svc != null) svc.clearAll();
-                  Toast.makeText(this, "已刪除所有物體", Toast.LENGTH_SHORT).show();
+              private void onClear(){
+                  OverlayService svc=OverlayService.getInstance();
+                  if(svc!=null) svc.clearAll();
+                  Toast.makeText(this,"已刪除所有物體",Toast.LENGTH_SHORT).show();
               }
-              private boolean hasPerm() { return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this); }
-              private void requestPerm() { startActivityForResult(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:"+getPackageName())), REQ_PERM); }
-              @Override protected void onActivityResult(int req, int res, Intent data) {
-                  super.onActivityResult(req, res, data);
-                  if (req == REQ_PERM && !hasPerm()) Toast.makeText(this, "需要「顯示在其他應用程式上方」的權限", Toast.LENGTH_LONG).show();
+              private boolean hasPerm(){return Build.VERSION.SDK_INT<Build.VERSION_CODES.M||Settings.canDrawOverlays(this);}
+              private void requestPerm(){startActivityForResult(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:"+getPackageName())),REQ_PERM);}
+              @Override protected void onActivityResult(int req,int res,Intent data){
+                  super.onActivityResult(req,res,data);
+                  if(req==REQ_PERM&&!hasPerm()) Toast.makeText(this,"需要「顯示在其他應用程式上方」的權限",Toast.LENGTH_LONG).show();
               }
           }
           JEOF
@@ -625,20 +641,15 @@ jobs:
           EOF
 
           mkdir -p app/src/main/res/drawable
-
-          # 圖示：球的樣子
           cat > app/src/main/res/drawable/ic_launcher_foreground.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp" android:height="108dp"
               android:viewportWidth="108" android:viewportHeight="108">
-              <!-- 球體 -->
               <path android:fillColor="#F44336"
                   android:pathData="M54,54 m-36,0 a36,36 0 1,0 72,0 a36,36 0 1,0 -72,0"/>
-              <!-- 高光 -->
               <path android:fillColor="#FFCDD2"
                   android:pathData="M40,38 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0"/>
-              <!-- 陰影弧線 -->
               <path android:fillColor="#00000000"
                   android:strokeColor="#C62828" android:strokeWidth="4"
                   android:pathData="M30,68 Q54,85 78,68"/>
