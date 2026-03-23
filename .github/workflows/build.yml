@@ -127,7 +127,6 @@ jobs:
               public float pinOffsetX, pinOffsetY;
               public boolean destroying=false;
               public float destroyTimer=0f;
-              // 靜止計數（用來做 snap）
               public int restFrames=0;
               public PhysBody(int type,float x,float y,float size,int color){
                   this.type=type;this.x=x;this.y=y;this.size=size;this.color=color;
@@ -147,6 +146,9 @@ jobs:
           }
           JEOF
 
+          # ========================================================
+          # 🚀 修正版的 PhysicsEngine：解決永動機與抖動問題
+          # ========================================================
           cat > app/src/main/java/com/example/balloverlay/PhysicsEngine.java << 'JEOF'
           package com.example.balloverlay;
           import java.util.List;
@@ -155,10 +157,10 @@ jobs:
               private static final float BALL_DAMP  = 0.60f;
               private static final float BOX_DAMP   = 0.28f;
               private static final float FRICTION   = 0.96f;
-              private static final float ROT_FRIC   = 0.88f;  // 旋轉阻尼強
-              private static final float SLEEP_V    = 12f;
-              private static final float SLEEP_ROT  = 3f;
-              private static final float SNAP_SPEED = 80f;    // 低於此速度才做角度 snap
+              private static final float ROT_FRIC   = 0.88f;  
+              private static final float SLEEP_V    = 25f;    // 提高睡眠速度門檻，更容易靜止
+              private static final float SLEEP_ROT  = 10f;    // 提高旋轉睡眠門檻
+              private static final float SNAP_SPEED = 120f;   // 放寬角度 snap 的觸發速度
               public  static final float BOX_BREAK  = 2500f;
               private int W, H;
               public PhysicsEngine(int w,int h){W=w;H=h;}
@@ -168,13 +170,11 @@ jobs:
                   for(PhysBody b:bodies){
                       if(b.dead||b.destroying) continue;
                       if(b.type==PhysBody.TYPE_NAIL){
-                          // 若沒釘住物體，讓釘子可以移動（但無重力）
                           if(!b.nailed&&!b.isDragging){
                               b.vx*=0.92f; b.vy*=0.92f;
                               b.x+=b.vx*dt; b.y+=b.vy*dt;
                               wallBounceNail(b);
                           }
-                          // 更新被釘住的物體位置
                           for(PhysBody p:b.pinnedBodies){
                               p.x=b.x+b.pinOffsetX; p.y=b.y+b.pinOffsetY;
                               p.vx=0; p.vy=0; p.rotV=0;
@@ -187,17 +187,18 @@ jobs:
                       b.x+=b.vx*dt; b.y+=b.vy*dt;
                       if(b.type==PhysBody.TYPE_BOX) b.rot+=b.rotV*dt;
                       wallBounce(b);
-                      // 靜止 snap：箱子速度很低時旋轉歸正
+                      
+                      // 靜止 snap 邏輯優化：讓箱子更容易平穩
                       if(b.type==PhysBody.TYPE_BOX){
                           float spd=(float)Math.sqrt(b.vx*b.vx+b.vy*b.vy);
-                          if(spd<SNAP_SPEED&&Math.abs(b.rotV)<SLEEP_ROT){
+                          if(spd<SNAP_SPEED && Math.abs(b.rotV)<SLEEP_ROT){
                               b.restFrames++;
-                              if(b.restFrames>30){
-                                  // 旋轉角度 snap 到最近的 90 度倍數
+                              if(b.restFrames>15){ // 加快判定
+                                  b.vx*=0.7f; b.vy*=0.7f; // 強制吸收動能
                                   float r=b.rot%360; if(r<0) r+=360;
                                   float nearest=Math.round(r/90f)*90f;
-                                  b.rot+=(nearest-r)*0.08f; // 緩慢歸正
-                                  b.rotV*=0.5f;
+                                  b.rot+=(nearest-r)*0.15f; // 加快歸正
+                                  b.rotV*=0.3f; // 強烈降低旋轉
                               }
                           } else { b.restFrames=0; }
                       }
@@ -209,11 +210,10 @@ jobs:
                       for(int j=i+1;j<bodies.size();j++){
                           PhysBody b=bodies.get(j);
                           if(b.dead||b.destroying) continue;
-                          // 釘子與其他物體的碰撞
                           if(a.type==PhysBody.TYPE_NAIL||b.type==PhysBody.TYPE_NAIL){
                               PhysBody nail=a.type==PhysBody.TYPE_NAIL?a:b;
                               PhysBody other=a.type==PhysBody.TYPE_NAIL?b:a;
-                              if(nail.nailed) continue; // 已釘住就不做普通碰撞
+                              if(nail.nailed) continue;
                               collideSimple(nail,other);
                           } else {
                               collide(a,b);
@@ -224,16 +224,23 @@ jobs:
 
               private void wallBounce(PhysBody b){
                   float damp=b.type==PhysBody.TYPE_BALL?BALL_DAMP:BOX_DAMP;
-                  if(b.x-b.size<0){b.x=b.size; b.vx = Math.abs(b.vx) * restitution;b.rotV*=-0.3f;}
-                  if(b.x+b.size>W){b.x=W-b.size; b.vx = Math.abs(b.vx) * restitution; b.rotV*=-0.3f;}
+                  if(b.x-b.size<0){b.x=b.size; b.vx=Math.abs(b.vx)*damp; b.rotV*=-0.3f;}
+                  if(b.x+b.size>W){b.x=W-b.size; b.vx=-Math.abs(b.vx)*damp; b.rotV*=-0.3f;}
                   if(b.y-b.size<0){b.y=b.size; b.vy=Math.abs(b.vy)*damp;}
                   if(b.y+b.size>H){
                       float impact=Math.abs(b.vy);
                       b.y=H-b.size;
                       if(b.type==PhysBody.TYPE_BOX&&impact>BOX_BREAK){b.dead=true;return;}
-                      b.vy=-impact*damp;
-                      b.rotV*=0.3f; // 落地時大幅減少旋轉
-                      if(Math.abs(b.vy)<SLEEP_V){b.vy=0;b.vx*=0.8f;b.rotV*=0.3f;}
+                      
+                      // 提高靜止門檻，避免微小彈跳 (Jitter)
+                      if(impact < SLEEP_V * 2f){
+                          b.vy=0; 
+                          b.vx*=0.6f; // 接觸地面時增加水平摩擦
+                          if(b.type==PhysBody.TYPE_BOX) b.rotV*=0.4f; // 箱子落地強烈阻止旋轉
+                      } else {
+                          b.vy=-impact*damp;
+                          b.rotV*=0.3f; 
+                      }
                   }
               }
 
@@ -244,36 +251,51 @@ jobs:
                   if(b.y+b.size>H){b.y=H-b.size;b.vy=-Math.abs(b.vy)*0.5f;}
               }
 
-              // 一般碰撞（球/箱）
               private void collide(PhysBody a,PhysBody b){
                   float dx=b.x-a.x,dy=b.y-a.y;
                   float dist=(float)Math.sqrt(dx*dx+dy*dy);
                   float minD=a.size+b.size;
                   if(dist>=minD||dist<0.01f) return;
+                  
                   float nx=dx/dist,ny=dy/dist;
                   float overlap=minD-dist;
-                  if(!a.isDragging){a.x-=nx*overlap*0.5f;a.y-=ny*overlap*0.5f;}
-                  if(!b.isDragging){b.x+=nx*overlap*0.5f;b.y+=ny*overlap*0.5f;}
+                  
+                  // 加入微小的 Slop (容差)，避免物體互相推擠時產生無限抖動
+                  float correction = Math.max(overlap - 0.5f, 0f) * 0.5f;
+                  if(!a.isDragging){a.x-=nx*correction;a.y-=ny*correction;}
+                  if(!b.isDragging){b.x+=nx*correction;b.y+=ny*correction;}
+                  
                   float dvx=b.vx-a.vx,dvy=b.vy-a.vy;
                   float dot=dvx*nx+dvy*ny;
                   if(dot>=0) return;
+                  
                   float speed=(float)Math.sqrt(dvx*dvx+dvy*dvy);
                   float damp=(a.type==PhysBody.TYPE_BALL&&b.type==PhysBody.TYPE_BALL)?BALL_DAMP:BOX_DAMP;
                   float imp=dot*damp;
+                  
                   if(!a.isDragging){a.vx+=imp*nx;a.vy+=imp*ny;}
                   if(!b.isDragging){b.vx-=imp*nx;b.vy-=imp*ny;}
-                  // 碰撞給旋轉的衝量非常小，且有上限
-                  float restitution = (a.type==PhysBody.TYPE_BALL&&b.type==PhysBody.TYPE_BALL) ? 0.55f : 0.20f;
-                  float imp = -(1f + restitution) * dot / 2f;
-                  if(!a.isDragging){a.vx-=imp*nx;a.vy-=imp*ny;}
-                  if(!b.isDragging){b.vx+=imp*nx;b.vy+=imp*ny;}
+                  
+                  // 解決永動機的核心：
+                  // 只有在相對速度夠大時，才轉換出旋轉動能。
+                  // 若速度很小（例如堆疊在一起），則產生強大摩擦力讓物體沉睡，而不是給予假旋轉。
+                  if(speed > 40f) {
+                      float rotImpA=clamp(imp*ny*2f,-100f,100f);
+                      float rotImpB=clamp(-imp*ny*2f,-100f,100f);
+                      if(!a.isDragging&&a.type==PhysBody.TYPE_BOX) a.rotV=clamp(a.rotV+rotImpA,-400f,400f);
+                      if(!b.isDragging&&b.type==PhysBody.TYPE_BOX) b.rotV=clamp(b.rotV+rotImpB,-400f,400f);
+                  } else {
+                      // 靜止/低速堆疊時，套用摩擦力吸收動能
+                      if(!a.isDragging) { a.vx*=0.8f; a.vy*=0.8f; a.rotV*=0.8f; }
+                      if(!b.isDragging) { b.vx*=0.8f; b.vy*=0.8f; b.rotV*=0.8f; }
+                  }
+                  
                   if(speed>BOX_BREAK){
                       if(b.type==PhysBody.TYPE_BOX) b.dead=true;
                       if(a.type==PhysBody.TYPE_BOX) a.dead=true;
                   }
               }
 
-              // 釘子與其他物體的簡單推開（不傳速度）
               private void collideSimple(PhysBody nail,PhysBody other){
                   float dx=other.x-nail.x,dy=other.y-nail.y;
                   float dist=(float)Math.sqrt(dx*dx+dy*dy);
@@ -638,7 +660,7 @@ jobs:
                               } else {
                                   body.vx+=dx*10f;body.vy+=dy*10f;
                                   // 旋轉衝量有上限
-                                  body.rotV=clamp(body.rotV+dx*1.5f,-300f,300f);
+                                  body.rotV=Math.max(-300f,Math.min(300f,body.rotV+dx*1.5f));
                                   body.x+=dx;body.y+=dy;
                               }
                               body.dragLastX=rawX;body.dragLastY=rawY;
@@ -650,7 +672,6 @@ jobs:
                       }
                       return false;
                   }
-                  private float clamp(float v,float min,float max){return Math.max(min,Math.min(max,v));}
               }
 
               private Notification buildNotification(){
@@ -760,7 +781,7 @@ jobs:
                   OverlayService svc=OverlayService.getInstance();
                   if(svc!=null){
                       svc.enterNailMode();
-                      moveTaskToBack(true); // 縮到後台讓釘子覆蓋層顯示
+                      moveTaskToBack(true);
                   }
               }
               private void onDeleteMode(){
