@@ -224,8 +224,8 @@ jobs:
 
               private void wallBounce(PhysBody b){
                   float damp=b.type==PhysBody.TYPE_BALL?BALL_DAMP:BOX_DAMP;
-                  if(b.x-b.size<0){b.x=b.size; b.vx=Math.abs(b.vx)*damp; b.rotV*=-0.3f;}
-                  if(b.x+b.size>W){b.x=W-b.size; b.vx=-Math.abs(b.vx)*damp; b.rotV*=-0.3f;}
+                  if(b.x-b.size<0){b.x=b.size; b.vx = Math.abs(b.vx) * restitution;b.rotV*=-0.3f;}
+                  if(b.x+b.size>W){b.x=W-b.size; b.vx = Math.abs(b.vx) * restitution; b.rotV*=-0.3f;}
                   if(b.y-b.size<0){b.y=b.size; b.vy=Math.abs(b.vy)*damp;}
                   if(b.y+b.size>H){
                       float impact=Math.abs(b.vy);
@@ -263,10 +263,10 @@ jobs:
                   if(!a.isDragging){a.vx+=imp*nx;a.vy+=imp*ny;}
                   if(!b.isDragging){b.vx-=imp*nx;b.vy-=imp*ny;}
                   // 碰撞給旋轉的衝量非常小，且有上限
-                  float rotImpA=clamp(imp*ny*3f,-150f,150f);
-                  float rotImpB=clamp(-imp*ny*3f,-150f,150f);
-                  if(!a.isDragging&&a.type==PhysBody.TYPE_BOX) a.rotV=clamp(a.rotV+rotImpA,-400f,400f);
-                  if(!b.isDragging&&b.type==PhysBody.TYPE_BOX) b.rotV=clamp(b.rotV+rotImpB,-400f,400f);
+                  float restitution = (a.type==PhysBody.TYPE_BALL&&b.type==PhysBody.TYPE_BALL) ? 0.55f : 0.20f;
+                  float imp = -(1f + restitution) * dot / 2f;
+                  if(!a.isDragging){a.vx-=imp*nx;a.vy-=imp*ny;}
+                  if(!b.isDragging){b.vx+=imp*nx;b.vy+=imp*ny;}
                   if(speed>BOX_BREAK){
                       if(b.type==PhysBody.TYPE_BOX) b.dead=true;
                       if(a.type==PhysBody.TYPE_BOX) a.dead=true;
