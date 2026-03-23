@@ -49,8 +49,8 @@ jobs:
                   applicationId "com.example.balloverlay"
                   minSdk 24
                   targetSdk 34
-                  versionCode 11
-                  versionName "11.0"
+                  versionCode 12
+                  versionName "12.0"
               }
               signingConfigs {
                   release {
@@ -107,7 +107,6 @@ jobs:
 
           mkdir -p app/src/main/java/com/example/balloverlay
 
-          # PhysBody.java
           cat > app/src/main/java/com/example/balloverlay/PhysBody.java << 'JEOF'
           package com.example.balloverlay;
           import java.util.ArrayList;
@@ -118,134 +117,185 @@ jobs:
               public static final int TYPE_NAIL = 2;
               public int type;
               public float x, y, vx, vy, size;
-              public float rot = 0f, rotV = 0f; // 旋轉角度(度)和旋轉速度
+              public float rot=0f, rotV=0f;
               public int color;
-              public boolean isDragging = false;
+              public boolean isDragging=false;
               public float dragLastX, dragLastY;
-              public boolean dead = false;
-              // 釘子相關
-              public boolean nailed = false;         // 是否已釘住物體
-              public List<PhysBody> pinnedBodies = new ArrayList<>(); // 被此釘子釘住的物體
-              public float pinOffsetX, pinOffsetY;   // 被釘住時相對釘子的偏移
-              // 刪除動畫
-              public boolean destroying = false;
-              public float destroyTimer = 0f;        // 0~1，動畫進度
-              public PhysBody(int type, float x, float y, float size, int color) {
-                  this.type=type; this.x=x; this.y=y; this.size=size; this.color=color;
+              public boolean dead=false;
+              public boolean nailed=false;
+              public List<PhysBody> pinnedBodies=new ArrayList<>();
+              public float pinOffsetX, pinOffsetY;
+              public boolean destroying=false;
+              public float destroyTimer=0f;
+              // 靜止計數（用來做 snap）
+              public int restFrames=0;
+              public PhysBody(int type,float x,float y,float size,int color){
+                  this.type=type;this.x=x;this.y=y;this.size=size;this.color=color;
               }
           }
           JEOF
 
-          # Shard.java
           cat > app/src/main/java/com/example/balloverlay/Shard.java << 'JEOF'
           package com.example.balloverlay;
           public class Shard {
-              public float x, y, vx, vy, w, h, rot, rotV;
+              public float x,y,vx,vy,w,h,rot,rotV;
               public int color;
-              public boolean gone = false;
+              public boolean gone=false;
               public Shard(float x,float y,float vx,float vy,float w,float h,float rot,float rotV,int color){
                   this.x=x;this.y=y;this.vx=vx;this.vy=vy;this.w=w;this.h=h;this.rot=rot;this.rotV=rotV;this.color=color;
               }
           }
           JEOF
 
-          # PhysicsEngine.java
           cat > app/src/main/java/com/example/balloverlay/PhysicsEngine.java << 'JEOF'
           package com.example.balloverlay;
           import java.util.List;
           public class PhysicsEngine {
               private static final float GRAVITY    = 1200f;
               private static final float BALL_DAMP  = 0.60f;
-              private static final float BOX_DAMP   = 0.30f;  // 箱子很不彈
+              private static final float BOX_DAMP   = 0.28f;
               private static final float FRICTION   = 0.96f;
-              private static final float ROT_FRIC   = 0.97f;
-              private static final float SLEEP      = 10f;
+              private static final float ROT_FRIC   = 0.88f;  // 旋轉阻尼強
+              private static final float SLEEP_V    = 12f;
+              private static final float SLEEP_ROT  = 3f;
+              private static final float SNAP_SPEED = 80f;    // 低於此速度才做角度 snap
               public  static final float BOX_BREAK  = 2500f;
               private int W, H;
-              public PhysicsEngine(int w, int h){W=w;H=h;}
-              public void setScreen(int w, int h){W=w;H=h;}
+              public PhysicsEngine(int w,int h){W=w;H=h;}
+              public void setScreen(int w,int h){W=w;H=h;}
 
               public void step(List<PhysBody> bodies, float dt){
                   for(PhysBody b:bodies){
                       if(b.dead||b.destroying) continue;
                       if(b.type==PhysBody.TYPE_NAIL){
-                          // 釘子：移動被釘住的物體
-                          if(!b.pinnedBodies.isEmpty()){
-                              for(PhysBody p:b.pinnedBodies){
-                                  p.x=b.x+b.pinOffsetX; p.y=b.y+b.pinOffsetY;
-                                  p.vx=0; p.vy=0;
-                              }
+                          // 若沒釘住物體，讓釘子可以移動（但無重力）
+                          if(!b.nailed&&!b.isDragging){
+                              b.vx*=0.92f; b.vy*=0.92f;
+                              b.x+=b.vx*dt; b.y+=b.vy*dt;
+                              wallBounceNail(b);
+                          }
+                          // 更新被釘住的物體位置
+                          for(PhysBody p:b.pinnedBodies){
+                              p.x=b.x+b.pinOffsetX; p.y=b.y+b.pinOffsetY;
+                              p.vx=0; p.vy=0; p.rotV=0;
                           }
                           continue;
                       }
                       if(b.isDragging) continue;
-                      // 重力
                       b.vy+=GRAVITY*dt;
                       b.vx*=FRICTION; b.rotV*=ROT_FRIC;
                       b.x+=b.vx*dt; b.y+=b.vy*dt;
-                      b.rot+=b.rotV*dt;
+                      if(b.type==PhysBody.TYPE_BOX) b.rot+=b.rotV*dt;
                       wallBounce(b);
-                  }
-                  // 物體間碰撞
-                  for(int i=0;i<bodies.size();i++){
-                      PhysBody a=bodies.get(i);
-                      if(a.dead||a.destroying||a.type==PhysBody.TYPE_NAIL) continue;
-                      for(int j=i+1;j<bodies.size();j++){
-                          PhysBody b=bodies.get(j);
-                          if(b.dead||b.destroying||b.type==PhysBody.TYPE_NAIL) continue;
-                          collide(a,b);
+                      // 靜止 snap：箱子速度很低時旋轉歸正
+                      if(b.type==PhysBody.TYPE_BOX){
+                          float spd=(float)Math.sqrt(b.vx*b.vx+b.vy*b.vy);
+                          if(spd<SNAP_SPEED&&Math.abs(b.rotV)<SLEEP_ROT){
+                              b.restFrames++;
+                              if(b.restFrames>30){
+                                  // 旋轉角度 snap 到最近的 90 度倍數
+                                  float r=b.rot%360; if(r<0) r+=360;
+                                  float nearest=Math.round(r/90f)*90f;
+                                  b.rot+=(nearest-r)*0.08f; // 緩慢歸正
+                                  b.rotV*=0.5f;
+                              }
+                          } else { b.restFrames=0; }
                       }
                   }
-              }
-
-              public void stepShards(List<Shard> shards, float dt, int sw, int sh){
-                  for(Shard s:shards){
-                      if(s.gone) continue;
-                      s.vy+=2000f*dt; s.x+=s.vx*dt; s.y+=s.vy*dt; s.rot+=s.rotV*dt;
-                      if(s.x<-400||s.x>sw+400||s.y>sh+400) s.gone=true;
+                  // 碰撞
+                  for(int i=0;i<bodies.size();i++){
+                      PhysBody a=bodies.get(i);
+                      if(a.dead||a.destroying) continue;
+                      for(int j=i+1;j<bodies.size();j++){
+                          PhysBody b=bodies.get(j);
+                          if(b.dead||b.destroying) continue;
+                          // 釘子與其他物體的碰撞
+                          if(a.type==PhysBody.TYPE_NAIL||b.type==PhysBody.TYPE_NAIL){
+                              PhysBody nail=a.type==PhysBody.TYPE_NAIL?a:b;
+                              PhysBody other=a.type==PhysBody.TYPE_NAIL?b:a;
+                              if(nail.nailed) continue; // 已釘住就不做普通碰撞
+                              collideSimple(nail,other);
+                          } else {
+                              collide(a,b);
+                          }
+                      }
                   }
               }
 
               private void wallBounce(PhysBody b){
                   float damp=b.type==PhysBody.TYPE_BALL?BALL_DAMP:BOX_DAMP;
-                  if(b.x-b.size<0){b.x=b.size; b.vx=Math.abs(b.vx)*damp; b.rotV*=-0.5f;}
-                  if(b.x+b.size>W){b.x=W-b.size; b.vx=-Math.abs(b.vx)*damp; b.rotV*=-0.5f;}
+                  if(b.x-b.size<0){b.x=b.size; b.vx=Math.abs(b.vx)*damp; b.rotV*=-0.3f;}
+                  if(b.x+b.size>W){b.x=W-b.size; b.vx=-Math.abs(b.vx)*damp; b.rotV*=-0.3f;}
                   if(b.y-b.size<0){b.y=b.size; b.vy=Math.abs(b.vy)*damp;}
                   if(b.y+b.size>H){
                       float impact=Math.abs(b.vy);
                       b.y=H-b.size;
                       if(b.type==PhysBody.TYPE_BOX&&impact>BOX_BREAK){b.dead=true;return;}
                       b.vy=-impact*damp;
-                      if(Math.abs(b.vy)<SLEEP){b.vy=0; b.vx*=0.85f; b.rotV*=0.5f;}
+                      b.rotV*=0.3f; // 落地時大幅減少旋轉
+                      if(Math.abs(b.vy)<SLEEP_V){b.vy=0;b.vx*=0.8f;b.rotV*=0.3f;}
                   }
               }
 
-              private void collide(PhysBody a, PhysBody b){
-                  float dx=b.x-a.x, dy=b.y-a.y;
+              private void wallBounceNail(PhysBody b){
+                  if(b.x-b.size<0){b.x=b.size;b.vx=Math.abs(b.vx)*0.5f;}
+                  if(b.x+b.size>W){b.x=W-b.size;b.vx=-Math.abs(b.vx)*0.5f;}
+                  if(b.y-b.size<0){b.y=b.size;b.vy=Math.abs(b.vy)*0.5f;}
+                  if(b.y+b.size>H){b.y=H-b.size;b.vy=-Math.abs(b.vy)*0.5f;}
+              }
+
+              // 一般碰撞（球/箱）
+              private void collide(PhysBody a,PhysBody b){
+                  float dx=b.x-a.x,dy=b.y-a.y;
                   float dist=(float)Math.sqrt(dx*dx+dy*dy);
                   float minD=a.size+b.size;
                   if(dist>=minD||dist<0.01f) return;
-                  float nx=dx/dist, ny=dy/dist;
+                  float nx=dx/dist,ny=dy/dist;
                   float overlap=minD-dist;
                   if(!a.isDragging){a.x-=nx*overlap*0.5f;a.y-=ny*overlap*0.5f;}
                   if(!b.isDragging){b.x+=nx*overlap*0.5f;b.y+=ny*overlap*0.5f;}
-                  float dvx=b.vx-a.vx, dvy=b.vy-a.vy;
+                  float dvx=b.vx-a.vx,dvy=b.vy-a.vy;
                   float dot=dvx*nx+dvy*ny;
                   if(dot>=0) return;
                   float speed=(float)Math.sqrt(dvx*dvx+dvy*dvy);
                   float damp=(a.type==PhysBody.TYPE_BALL&&b.type==PhysBody.TYPE_BALL)?BALL_DAMP:BOX_DAMP;
                   float imp=dot*damp;
-                  if(!a.isDragging){a.vx+=imp*nx;a.vy+=imp*ny;a.rotV+=imp*20f;}
-                  if(!b.isDragging){b.vx-=imp*nx;b.vy-=imp*ny;b.rotV-=imp*20f;}
+                  if(!a.isDragging){a.vx+=imp*nx;a.vy+=imp*ny;}
+                  if(!b.isDragging){b.vx-=imp*nx;b.vy-=imp*ny;}
+                  // 碰撞給旋轉的衝量非常小，且有上限
+                  float rotImpA=clamp(imp*ny*3f,-150f,150f);
+                  float rotImpB=clamp(-imp*ny*3f,-150f,150f);
+                  if(!a.isDragging&&a.type==PhysBody.TYPE_BOX) a.rotV=clamp(a.rotV+rotImpA,-400f,400f);
+                  if(!b.isDragging&&b.type==PhysBody.TYPE_BOX) b.rotV=clamp(b.rotV+rotImpB,-400f,400f);
                   if(speed>BOX_BREAK){
                       if(b.type==PhysBody.TYPE_BOX) b.dead=true;
                       if(a.type==PhysBody.TYPE_BOX) a.dead=true;
                   }
               }
+
+              // 釘子與其他物體的簡單推開（不傳速度）
+              private void collideSimple(PhysBody nail,PhysBody other){
+                  float dx=other.x-nail.x,dy=other.y-nail.y;
+                  float dist=(float)Math.sqrt(dx*dx+dy*dy);
+                  float minD=nail.size+other.size;
+                  if(dist>=minD||dist<0.01f) return;
+                  float nx=dx/dist,ny=dy/dist;
+                  float overlap=minD-dist;
+                  if(!other.isDragging){other.x+=nx*overlap;other.y+=ny*overlap;other.vx+=nx*200f;other.vy+=ny*200f;}
+              }
+
+              public void stepShards(List<Shard> shards,float dt,int sw,int sh){
+                  for(Shard s:shards){
+                      if(s.gone) continue;
+                      s.vy+=2000f*dt;s.x+=s.vx*dt;s.y+=s.vy*dt;s.rot+=s.rotV*dt;
+                      if(s.x<-400||s.x>sw+400||s.y>sh+400) s.gone=true;
+                  }
+              }
+
+              private float clamp(float v,float min,float max){return Math.max(min,Math.min(max,v));}
           }
           JEOF
 
-          # OverlayService.java
           cat > app/src/main/java/com/example/balloverlay/OverlayService.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
@@ -262,16 +312,19 @@ jobs:
           public class OverlayService extends Service implements Choreographer.FrameCallback {
               private static OverlayService instance;
               private WindowManager wm;
-              private int screenW, screenH, overlayType;
-              private final List<PhysBody> bodies  = new ArrayList<>();
-              private final List<Shard>    shards  = new ArrayList<>();
-              private final PhysicsEngine  physics = new PhysicsEngine(1,1);
+              private int screenW,screenH,overlayType;
+              private final List<PhysBody> bodies=new ArrayList<>();
+              private final List<Shard> shards=new ArrayList<>();
+              private final PhysicsEngine physics=new PhysicsEngine(1,1);
               private long lastTime=0;
               private DrawView drawView;
               private boolean isDrawing=false;
               private final List<BodyTouchView> touchViews=new ArrayList<>();
-              // 刪除模式
-              public boolean deleteMode=false;
+              // 模式：0=正常 1=刪除 2=放釘子
+              public int interactMode=0;
+              // 放釘子用的覆蓋層觸控 View
+              private NailPlaceView nailPlaceView;
+              private boolean nailPlaceAdded=false;
 
               private static final int[] BALL_COLORS={
                   Color.parseColor("#F44336"),Color.parseColor("#2196F3"),
@@ -283,15 +336,16 @@ jobs:
               public static OverlayService getInstance(){return instance;}
 
               @Override public void onCreate(){
-                  super.onCreate(); instance=this;
+                  super.onCreate();instance=this;
                   wm=(WindowManager)getSystemService(WINDOW_SERVICE);
-                  DisplayMetrics dm=new DisplayMetrics(); wm.getDefaultDisplay().getRealMetrics(dm);
-                  screenW=dm.widthPixels; screenH=dm.heightPixels;
+                  DisplayMetrics dm=new DisplayMetrics();wm.getDefaultDisplay().getRealMetrics(dm);
+                  screenW=dm.widthPixels;screenH=dm.heightPixels;
                   physics.setScreen(screenW,screenH);
                   overlayType=Build.VERSION.SDK_INT>=Build.VERSION_CODES.O
                       ?WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                       :WindowManager.LayoutParams.TYPE_PHONE;
                   drawView=new DrawView(this);
+                  nailPlaceView=new NailPlaceView(this);
                   startForeground(1,buildNotification());
                   Choreographer.getInstance().postFrameCallback(this);
               }
@@ -302,17 +356,14 @@ jobs:
                   lastTime=frameTimeNanos;
                   physics.step(bodies,dt);
                   physics.stepShards(shards,dt,screenW,screenH);
-                  // 更新刪除動畫
                   for(int i=bodies.size()-1;i>=0;i--){
                       PhysBody b=bodies.get(i);
                       if(b.destroying){
-                          b.destroyTimer+=dt*2.5f; // 0.4秒完成
-                          if(b.destroyTimer>=1f){ removeBodyAt(i); continue; }
+                          b.destroyTimer+=dt*2.5f;
+                          if(b.destroyTimer>=1f){removeBodyAt(i);continue;}
                       } else if(b.dead&&b.type==PhysBody.TYPE_BOX){
-                          spawnShards(b); removeBodyAt(i);
-                      } else if(b.dead){
-                          removeBodyAt(i);
-                      }
+                          spawnShards(b);removeBodyAt(i);
+                      } else if(b.dead){removeBodyAt(i);}
                   }
                   for(int i=shards.size()-1;i>=0;i--)
                       if(shards.get(i).gone) shards.remove(i);
@@ -322,40 +373,58 @@ jobs:
                   Choreographer.getInstance().postFrameCallback(this);
               }
 
-              // 釘子放置：檢查下方是否有物體
-              public void addNail(float x, float y){
+              // 放置釘子模式：顯示全螢幕觸控層讓使用者點選位置
+              public void enterNailMode(){
+                  interactMode=2;
+                  ensureDrawView();
+                  if(!nailPlaceAdded){
+                      WindowManager.LayoutParams np=new WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.MATCH_PARENT,
+                          overlayType,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                          |WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          PixelFormat.TRANSLUCENT);
+                      wm.addView(nailPlaceView,np);nailPlaceAdded=true;
+                  }
+              }
+
+              public void exitNailMode(){
+                  interactMode=0;
+                  if(nailPlaceAdded){wm.removeView(nailPlaceView);nailPlaceAdded=false;}
+              }
+
+              public void placeNailAt(float x,float y){
                   float nailR=28f;
                   PhysBody nail=new PhysBody(PhysBody.TYPE_NAIL,x,y,nailR,Color.parseColor("#9E9E9E"));
-                  // 找正下方最近的物體
+                  // 找最近的物體
+                  PhysBody nearest=null; float nearDist=Float.MAX_VALUE;
                   for(PhysBody b:bodies){
                       if(b.type==PhysBody.TYPE_NAIL||b.dead||b.destroying) continue;
-                      float dx=x-b.x, dy=y-b.y;
+                      float dx=x-b.x,dy=y-b.y;
                       float dist=(float)Math.sqrt(dx*dx+dy*dy);
-                      if(dist<b.size+nailR+10f){
-                          // 釘住它
-                          nail.nailed=true;
-                          nail.pinnedBodies.add(b);
-                          nail.pinOffsetX=b.x-x;
-                          nail.pinOffsetY=b.y-y;
-                          b.vx=0; b.vy=0; b.rotV=0;
-                          break;
-                      }
+                      if(dist<b.size+nailR+20f&&dist<nearDist){nearDist=dist;nearest=b;}
+                  }
+                  if(nearest!=null){
+                      nail.nailed=true;
+                      nail.pinnedBodies.add(nearest);
+                      nail.pinOffsetX=nearest.x-x;
+                      nail.pinOffsetY=nearest.y-y;
+                      nearest.vx=0;nearest.vy=0;nearest.rotV=0;
                   }
                   addBody(nail,(int)(nailR*2),(int)(nailR*2));
+                  exitNailMode();
               }
 
               public void addBall(float x,float y,float r){
-                  PhysBody b=new PhysBody(PhysBody.TYPE_BALL,x,y,r,BALL_COLORS[rnd.nextInt(BALL_COLORS.length)]);
-                  addBody(b,(int)(r*2),(int)(r*2));
+                  addBody(new PhysBody(PhysBody.TYPE_BALL,x,y,r,BALL_COLORS[rnd.nextInt(BALL_COLORS.length)]),(int)(r*2),(int)(r*2));
               }
 
               public void addBox(float x,float y,float half){
-                  PhysBody b=new PhysBody(PhysBody.TYPE_BOX,x,y,half,Color.parseColor("#8D6E63"));
-                  addBody(b,(int)(half*2),(int)(half*2));
+                  addBody(new PhysBody(PhysBody.TYPE_BOX,x,y,half,Color.parseColor("#8D6E63")),(int)(half*2),(int)(half*2));
               }
 
               private void addBody(PhysBody b,int w,int h){
-                  bodies.add(b); ensureDrawView();
+                  bodies.add(b);ensureDrawView();
                   BodyTouchView tv=new BodyTouchView(this,b);
                   touchViews.add(tv);
                   WindowManager.LayoutParams tp=new WindowManager.LayoutParams(
@@ -364,8 +433,8 @@ jobs:
                       |WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                       PixelFormat.TRANSLUCENT);
                   tp.gravity=Gravity.TOP|Gravity.LEFT;
-                  tp.x=(int)(b.x-b.size); tp.y=(int)(b.y-b.size);
-                  tv.lp=tp; wm.addView(tv,tp);
+                  tp.x=(int)(b.x-b.size);tp.y=(int)(b.y-b.size);
+                  tv.lp=tp;wm.addView(tv,tp);
               }
 
               private void ensureDrawView(){
@@ -377,29 +446,22 @@ jobs:
                           |WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                           |WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                           PixelFormat.TRANSLUCENT);
-                      wm.addView(drawView,dp); isDrawing=true;
+                      wm.addView(drawView,dp);isDrawing=true;
                   }
               }
 
               public void destroyBody(PhysBody b){
                   if(b.destroying||b.dead) return;
                   if(b.type==PhysBody.TYPE_NAIL){
-                      // 拔除釘子：釋放被釘住的物體
-                      for(PhysBody p:b.pinnedBodies){
-                          p.vx=(rnd.nextFloat()-0.5f)*200f;
-                          p.vy=-200f;
-                      }
+                      for(PhysBody p:b.pinnedBodies){p.vx=(rnd.nextFloat()-0.5f)*200f;p.vy=-200f;}
                       b.pinnedBodies.clear();
                   }
-                  b.destroying=true; b.destroyTimer=0f;
+                  b.destroying=true;b.destroyTimer=0f;
               }
 
               private void removeBodyAt(int i){
-                  // 若被釘子釘住，先解除
                   PhysBody removed=bodies.get(i);
-                  for(PhysBody b:bodies){
-                      if(b.type==PhysBody.TYPE_NAIL) b.pinnedBodies.remove(removed);
-                  }
+                  for(PhysBody b:bodies) b.pinnedBodies.remove(removed);
                   bodies.remove(i);
                   if(i<touchViews.size()){
                       try{wm.removeView(touchViews.get(i));}catch(Exception ignored){}
@@ -413,26 +475,53 @@ jobs:
                   for(int i=0;i<6;i++){
                       float angle=(float)(rnd.nextFloat()*Math.PI*2);
                       float speed=600f+rnd.nextFloat()*1000f;
-                      float vx=(float)Math.cos(angle)*speed+box.vx*0.3f;
-                      float vy=(float)Math.sin(angle)*speed+box.vy*0.3f-300f;
-                      float w=s*(0.35f+rnd.nextFloat()*0.55f), h=s*(0.12f+rnd.nextFloat()*0.18f);
-                      int col=i%2==0?box.color:darken(box.color);
-                      shards.add(new Shard(box.x+(rnd.nextFloat()-0.5f)*s,box.y+(rnd.nextFloat()-0.5f)*s,
-                          vx,vy,w,h,rnd.nextFloat()*360f,(rnd.nextFloat()-0.5f)*720f,col));
+                      shards.add(new Shard(
+                          box.x+(rnd.nextFloat()-0.5f)*s,box.y+(rnd.nextFloat()-0.5f)*s,
+                          (float)Math.cos(angle)*speed+box.vx*0.3f,
+                          (float)Math.sin(angle)*speed+box.vy*0.3f-300f,
+                          s*(0.35f+rnd.nextFloat()*0.55f),s*(0.12f+rnd.nextFloat()*0.18f),
+                          rnd.nextFloat()*360f,(rnd.nextFloat()-0.5f)*720f,
+                          i%2==0?box.color:darken(box.color)));
                   }
               }
 
               int darken(int c){return Color.rgb((int)(Color.red(c)*.55f),(int)(Color.green(c)*.55f),(int)(Color.blue(c)*.55f));}
 
               public void clearAll(){
-                  bodies.clear(); shards.clear();
+                  bodies.clear();shards.clear();
                   for(BodyTouchView tv:touchViews){try{wm.removeView(tv);}catch(Exception ignored){}}
                   touchViews.clear();
                   if(isDrawing){wm.removeView(drawView);isDrawing=false;}
-                  deleteMode=false;
+                  exitNailMode();interactMode=0;
               }
 
-              // ── DrawView ──
+              // 釘子放置覆蓋層：全螢幕，顯示提示，點擊後放釘子
+              @SuppressLint("ViewConstructor")
+              class NailPlaceView extends View {
+                  private final Paint hint=new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint bg=new Paint();
+                  NailPlaceView(Context ctx){
+                      super(ctx);
+                      hint.setColor(Color.WHITE);hint.setTextSize(50f);hint.setTextAlign(Paint.Align.CENTER);
+                      bg.setColor(0x44000000);
+                  }
+                  @Override protected void onDraw(Canvas c){
+                      c.drawColor(Color.TRANSPARENT,PorterDuff.Mode.CLEAR);
+                      c.drawRect(0,0,getWidth(),getHeight(),bg);
+                      c.drawText("點擊放置釘子",getWidth()/2f,getHeight()/2f-20f,hint);
+                      hint.setTextSize(32f);hint.setColor(0xFFFFB300);
+                      c.drawText("點擊其他物體上方可釘住它",getWidth()/2f,getHeight()/2f+40f,hint);
+                      hint.setTextSize(50f);hint.setColor(Color.WHITE);
+                  }
+                  @Override public boolean onTouchEvent(MotionEvent e){
+                      if(e.getAction()==MotionEvent.ACTION_UP){
+                          placeNailAt(e.getX(),e.getY());
+                      }
+                      return true;
+                  }
+              }
+
+              // DrawView
               @SuppressLint("ViewConstructor")
               class DrawView extends View {
                   private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -441,114 +530,87 @@ jobs:
                   @Override protected void onDraw(Canvas canvas){
                       canvas.drawColor(Color.TRANSPARENT,PorterDuff.Mode.CLEAR);
                       for(int i=0;i<bodies.size()&&i<touchViews.size();i++){
-                          PhysBody b=bodies.get(i);
-                          if(b.dead) continue;
-                          float alpha=b.destroying?Math.max(0f,1f-b.destroyTimer):1f;
-                          p.setAlpha((int)(255*alpha));
-                          if(b.type==PhysBody.TYPE_BALL) drawBall(canvas,b,alpha);
-                          else if(b.type==PhysBody.TYPE_BOX) drawBox(canvas,b,alpha);
-                          else drawNail(canvas,b,alpha);
+                          PhysBody b=bodies.get(i);if(b.dead) continue;
+                          if(b.type==PhysBody.TYPE_BALL) drawBall(canvas,b);
+                          else if(b.type==PhysBody.TYPE_BOX) drawBox(canvas,b);
+                          else drawNail(canvas,b);
                       }
-                      // 碎片
                       for(Shard s:shards){
                           if(s.gone) continue;
-                          canvas.save(); canvas.translate(s.x,s.y); canvas.rotate(s.rot);
-                          sp.setColor(s.color); sp.setStyle(Paint.Style.FILL); sp.setAlpha(220);
+                          canvas.save();canvas.translate(s.x,s.y);canvas.rotate(s.rot);
+                          sp.setColor(s.color);sp.setStyle(Paint.Style.FILL);sp.setAlpha(230);
                           canvas.drawRect(-s.w/2,-s.h/2,s.w/2,s.h/2,sp);
-                          sp.setColor(darken(s.color)); sp.setStyle(Paint.Style.STROKE); sp.setStrokeWidth(2f);
+                          sp.setColor(darken(s.color));sp.setStyle(Paint.Style.STROKE);sp.setStrokeWidth(2f);
                           canvas.drawRect(-s.w/2,-s.h/2,s.w/2,s.h/2,sp);
                           canvas.restore();
                       }
-                      // 刪除模式提示
-                      if(deleteMode){
+                      if(interactMode==1){
                           Paint hp=new Paint(Paint.ANTI_ALIAS_FLAG);
-                          hp.setColor(0xAAFF0000); hp.setTextSize(48f); hp.setTextAlign(Paint.Align.CENTER);
-                          canvas.drawText("點選要刪除的物體",screenW/2f,120f,hp);
+                          hp.setColor(0xDDFF3333);hp.setTextSize(48f);hp.setTextAlign(Paint.Align.CENTER);
+                          canvas.drawText("點選要刪除的物體",screenW/2f,130f,hp);
                       }
                   }
-                  private void drawBall(Canvas c,PhysBody b,float alpha){
+                  private void drawBall(Canvas c,PhysBody b){
+                      float alpha=b.destroying?Math.max(0f,1f-b.destroyTimer):1f;
                       if(b.destroying){
-                          // 氣球爆炸：縮小+皺縮
                           float t=b.destroyTimer;
                           float r=b.size*(1f-t*0.7f);
-                          p.setShader(null); p.setColor(b.color); p.setAlpha((int)(255*(1f-t)*1.5f));
+                          p.setShader(null);p.setColor(b.color);p.setAlpha((int)(255*(1f-t)*1.4f));
                           c.drawCircle(b.x,b.y,Math.max(r,2f),p);
-                          // 爆炸小點
                           for(int k=0;k<6;k++){
                               float angle=(float)(k*Math.PI/3+t*10);
-                              float dist=b.size*t*1.5f;
-                              float px=(float)(b.x+Math.cos(angle)*dist);
-                              float py=(float)(b.y+Math.sin(angle)*dist);
+                              float px=(float)(b.x+Math.cos(angle)*b.size*t*1.6f);
+                              float py=(float)(b.y+Math.sin(angle)*b.size*t*1.6f);
                               p.setAlpha((int)(200*(1f-t)));
-                              c.drawCircle(px,py,b.size*.15f,p);
+                              c.drawCircle(px,py,b.size*.14f,p);
                           }
                           return;
                       }
                       int col=b.color;
                       int light=Color.rgb(Math.min(255,Color.red(col)+90),Math.min(255,Color.green(col)+90),Math.min(255,Color.blue(col)+90));
                       p.setShader(new RadialGradient(b.x-b.size*.3f,b.y-b.size*.3f,b.size,light,col,Shader.TileMode.CLAMP));
-                      p.setAlpha((int)(255*alpha));
-                      c.drawCircle(b.x,b.y,b.size,p);
-                      p.setShader(null); p.setColor(0xCCFFFFFF); p.setAlpha((int)(200*alpha));
+                      p.setAlpha(255);c.drawCircle(b.x,b.y,b.size,p);
+                      p.setShader(null);p.setColor(0xCCFFFFFF);p.setAlpha(200);
                       c.drawCircle(b.x-b.size*.28f,b.y-b.size*.28f,b.size*.22f,p);
                   }
-                  private void drawBox(Canvas c,PhysBody b,float alpha){
+                  private void drawBox(Canvas c,PhysBody b){
                       float s=b.size;
-                      c.save(); c.translate(b.x,b.y); c.rotate(b.rot);
-                      if(b.destroying){
-                          float t=b.destroyTimer;
-                          p.setShader(null); p.setColor(b.color); p.setAlpha((int)(255*(1f-t)));
-                          float shrink=1f-t*0.5f;
-                          c.scale(shrink,shrink);
-                      } else {
-                          p.setShader(null); p.setColor(b.color); p.setAlpha((int)(255*alpha));
-                      }
+                      c.save();c.translate(b.x,b.y);c.rotate(b.rot);
+                      float alpha=b.destroying?1f-b.destroyTimer:1f;
+                      if(b.destroying) c.scale(1f-b.destroyTimer*0.5f,1f-b.destroyTimer*0.5f);
+                      p.setShader(null);p.setColor(b.color);p.setAlpha((int)(255*alpha));p.setStyle(Paint.Style.FILL);
                       c.drawRoundRect(new RectF(-s,-s,s,s),10,10,p);
-                      p.setColor(darken(b.color)); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3f);
+                      p.setColor(darken(b.color));p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(3f);p.setAlpha((int)(230*alpha));
                       c.drawRoundRect(new RectF(-s+4,-s+4,s-4,s-4),8,8,p);
-                      c.drawLine(-s+6,0,s-6,0,p);
-                      c.drawLine(0,-s+6,0,s-6,p);
+                      c.drawLine(-s+6,0,s-6,0,p);c.drawLine(0,-s+6,0,s-6,p);
                       p.setStyle(Paint.Style.FILL);
                       c.restore();
                   }
-                  private void drawNail(Canvas c,PhysBody b,float alpha){
+                  private void drawNail(Canvas c,PhysBody b){
                       float r=b.size;
+                      float alpha=b.destroying?1f-b.destroyTimer:1f;
                       if(b.destroying){
-                          float t=b.destroyTimer;
-                          float scale=1f+t*0.5f;
-                          p.setColor(b.color); p.setAlpha((int)(255*(1f-t)));
-                          c.drawCircle(b.x,b.y,r*scale,p);
-                          return;
+                          p.setColor(Color.parseColor("#9E9E9E"));p.setAlpha((int)(255*(1f-b.destroyTimer)));
+                          c.drawCircle(b.x,b.y,r*(1f+b.destroyTimer),p);return;
                       }
-                      // 外圈
-                      p.setColor(Color.parseColor("#616161")); p.setAlpha((int)(255*alpha));
+                      p.setColor(Color.parseColor("#616161"));p.setAlpha((int)(255*alpha));p.setStyle(Paint.Style.FILL);
                       c.drawCircle(b.x,b.y,r,p);
-                      // 內圈
-                      p.setColor(Color.parseColor("#BDBDBD"));
-                      c.drawCircle(b.x,b.y,r*.65f,p);
-                      // 中心點
-                      p.setColor(Color.parseColor("#212121"));
-                      c.drawCircle(b.x,b.y,r*.2f,p);
-                      // 若已釘住物體，加一圈橙色環
+                      p.setColor(Color.parseColor("#BDBDBD"));c.drawCircle(b.x,b.y,r*.65f,p);
+                      p.setColor(Color.parseColor("#212121"));c.drawCircle(b.x,b.y,r*.2f,p);
                       if(b.nailed&&!b.pinnedBodies.isEmpty()){
-                          p.setColor(Color.parseColor("#FF9800")); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(4f);
-                          c.drawCircle(b.x,b.y,r+4f,p); p.setStyle(Paint.Style.FILL);
+                          p.setColor(Color.parseColor("#FF9800"));p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(4f);
+                          c.drawCircle(b.x,b.y,r+5f,p);p.setStyle(Paint.Style.FILL);
                       }
                   }
               }
 
-              // ── BodyTouchView ──
+              // BodyTouchView
               @SuppressLint("ViewConstructor")
               class BodyTouchView extends View {
                   final PhysBody body;
                   WindowManager.LayoutParams lp;
                   private int lastX=Integer.MIN_VALUE,lastY=Integer.MIN_VALUE;
-                  private long pressStart=0;
-                  private static final long LONG_PRESS_MS=500;
-                  private boolean longPressed=false;
-
                   BodyTouchView(Context ctx,PhysBody b){super(ctx);this.body=b;}
-
                   void syncPosition(){
                       if(lp==null||body.isDragging) return;
                       int nx=(int)(body.x-body.size),ny=(int)(body.y-body.size);
@@ -557,46 +619,38 @@ jobs:
                           try{wm.updateViewLayout(this,lp);}catch(Exception ignored){}
                       }
                   }
-
                   @Override public boolean onTouchEvent(MotionEvent e){
                       float rawX=e.getRawX(),rawY=e.getRawY();
                       switch(e.getAction()){
                           case MotionEvent.ACTION_DOWN:
-                              pressStart=System.currentTimeMillis(); longPressed=false;
-                              if(deleteMode){ destroyBody(body); deleteMode=false; return true; }
-                              body.isDragging=true; body.vx=0; body.vy=0;
+                              if(interactMode==1){destroyBody(body);interactMode=0;return true;}
+                              body.isDragging=true;body.vx=0;body.vy=0;
                               if(body.type!=PhysBody.TYPE_NAIL) body.rotV=0;
-                              body.dragLastX=rawX; body.dragLastY=rawY; return true;
+                              body.dragLastX=rawX;body.dragLastY=rawY;return true;
                           case MotionEvent.ACTION_MOVE:
-                              // 長按判斷（釘子用）
-                              if(!longPressed&&body.type==PhysBody.TYPE_NAIL
-                                  &&System.currentTimeMillis()-pressStart>LONG_PRESS_MS){
-                                  longPressed=true;
-                              }
                               float dx=rawX-body.dragLastX,dy=rawY-body.dragLastY;
                               if(body.type==PhysBody.TYPE_NAIL){
-                                  // 釘子：直接移動（不施力），被釘物體跟著動
-                                  body.x+=dx; body.y+=dy;
-                                  // 更新被釘物體位置
+                                  body.x+=dx;body.y+=dy;
                                   for(PhysBody p:body.pinnedBodies){
-                                      p.x=body.x+body.pinOffsetX; p.y=body.y+body.pinOffsetY;
-                                      p.vx=0; p.vy=0;
+                                      p.x=body.x+body.pinOffsetX;p.y=body.y+body.pinOffsetY;
+                                      p.vx=0;p.vy=0;
                                   }
                               } else {
-                                  body.vx+=dx*10f; body.vy+=dy*10f;
-                                  body.rotV+=dx*2f;
-                                  body.x+=dx; body.y+=dy;
+                                  body.vx+=dx*10f;body.vy+=dy*10f;
+                                  // 旋轉衝量有上限
+                                  body.rotV=clamp(body.rotV+dx*1.5f,-300f,300f);
+                                  body.x+=dx;body.y+=dy;
                               }
-                              body.dragLastX=rawX; body.dragLastY=rawY;
-                              lp.x=(int)(body.x-body.size); lp.y=(int)(body.y-body.size);
+                              body.dragLastX=rawX;body.dragLastY=rawY;
+                              lp.x=(int)(body.x-body.size);lp.y=(int)(body.y-body.size);
                               try{wm.updateViewLayout(this,lp);}catch(Exception ignored){}
                               return true;
-                          case MotionEvent.ACTION_UP:
-                          case MotionEvent.ACTION_CANCEL:
-                              body.isDragging=false; longPressed=false; return true;
+                          case MotionEvent.ACTION_UP:case MotionEvent.ACTION_CANCEL:
+                              body.isDragging=false;return true;
                       }
                       return false;
                   }
+                  private float clamp(float v,float min,float max){return Math.max(min,Math.min(max,v));}
               }
 
               private Notification buildNotification(){
@@ -611,13 +665,12 @@ jobs:
               }
               @Override public int onStartCommand(Intent i,int f,int s){return START_STICKY;}
               @Override public void onDestroy(){
-                  super.onDestroy(); Choreographer.getInstance().removeFrameCallback(this); clearAll(); instance=null;
+                  super.onDestroy();Choreographer.getInstance().removeFrameCallback(this);clearAll();instance=null;
               }
               @Override public IBinder onBind(Intent i){return null;}
           }
           JEOF
 
-          # SummonActivity.java
           cat > app/src/main/java/com/example/balloverlay/SummonActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.annotation.SuppressLint;
@@ -627,9 +680,9 @@ jobs:
           import android.view.*;
           public class SummonActivity extends Activity {
               private float startX=-1,startY=-1,curX,curY;
-              private int mode=0; // 0=ball 1=box 2=nail
+              private int mode=0;
               @Override protected void onCreate(Bundle s){
-                  super.onCreate(s); mode=getIntent().getIntExtra("mode",0);
+                  super.onCreate(s);mode=getIntent().getIntExtra("mode",0);
                   requestWindowFeature(Window.FEATURE_NO_TITLE);
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
                   setContentView(new DrawView(this));
@@ -638,20 +691,13 @@ jobs:
               class DrawView extends View {
                   private final Paint bg=new Paint(),shape=new Paint(Paint.ANTI_ALIAS_FLAG),hint=new Paint(Paint.ANTI_ALIAS_FLAG),line=new Paint(Paint.ANTI_ALIAS_FLAG);
                   DrawView(SummonActivity c){
-                      super(c); bg.setColor(0xBB000000);
-                      int col=mode==0?0xFF4FC3F7:mode==1?0xFF8D6E63:0xFF9E9E9E;
-                      shape.setColor(col); shape.setAlpha(180); shape.setStyle(Paint.Style.FILL);
-                      hint.setColor(Color.WHITE); hint.setTextSize(52f); hint.setTextAlign(Paint.Align.CENTER); hint.setAntiAlias(true);
-                      line.setColor(Color.WHITE); line.setStrokeWidth(3f); line.setAntiAlias(true);
+                      super(c);bg.setColor(0xBB000000);
+                      shape.setColor(mode==0?0xFF4FC3F7:0xFF8D6E63);shape.setAlpha(180);shape.setStyle(Paint.Style.FILL);
+                      hint.setColor(Color.WHITE);hint.setTextSize(52f);hint.setTextAlign(Paint.Align.CENTER);hint.setAntiAlias(true);
+                      line.setColor(Color.WHITE);line.setStrokeWidth(3f);line.setAntiAlias(true);
                   }
                   @Override protected void onDraw(Canvas c){
                       c.drawRect(0,0,getWidth(),getHeight(),bg);
-                      if(mode==2){
-                          // 釘子：點一下就好
-                          hint.setTextSize(52f);
-                          c.drawText("點擊要釘住的位置",getWidth()/2f,getHeight()/2f,hint);
-                          return;
-                      }
                       String label=mode==0?"球":"箱子";
                       if(startX<0){
                           c.drawText("點擊設定中心",getWidth()/2f,getHeight()/2f-30f,hint);
@@ -662,28 +708,20 @@ jobs:
                           else c.drawRect(startX-r,startY-r,startX+r,startY+r,shape);
                           c.drawLine(startX,startY,curX,curY,line);
                           hint.setTextSize(40f);
-                          float ly=startY-r-24f; if(ly<60f) ly=startY+r+60f;
+                          float ly=startY-r-24f;if(ly<60f) ly=startY+r+60f;
                           c.drawText("大小: "+(int)r+"px",startX,ly,hint);
                           c.drawText("放開召喚",getWidth()/2f,80f,hint);
                       }
                   }
                   @Override public boolean onTouchEvent(MotionEvent e){
-                      if(mode==2){
-                          if(e.getAction()==MotionEvent.ACTION_UP){
-                              OverlayService svc=OverlayService.getInstance();
-                              if(svc!=null) svc.addNail(e.getX(),e.getY());
-                              finish();
-                          }
-                          return true;
-                      }
                       switch(e.getAction()){
-                          case MotionEvent.ACTION_DOWN: startX=e.getX();startY=e.getY();curX=startX;curY=startY;invalidate();return true;
-                          case MotionEvent.ACTION_MOVE: curX=e.getX();curY=e.getY();invalidate();return true;
+                          case MotionEvent.ACTION_DOWN:startX=e.getX();startY=e.getY();curX=startX;curY=startY;invalidate();return true;
+                          case MotionEvent.ACTION_MOVE:curX=e.getX();curY=e.getY();invalidate();return true;
                           case MotionEvent.ACTION_UP:
-                              float r=(float)Math.hypot(curX-startX,curY-startY); r=Math.max(r,20f);
+                              float r=(float)Math.hypot(curX-startX,curY-startY);r=Math.max(r,20f);
                               OverlayService svc=OverlayService.getInstance();
                               if(svc!=null){if(mode==0)svc.addBall(startX,startY,r);else svc.addBox(startX,startY,r);}
-                              finish(); return true;
+                              finish();return true;
                       }
                       return false;
                   }
@@ -691,7 +729,6 @@ jobs:
           }
           JEOF
 
-          # MainActivity.java
           cat > app/src/main/java/com/example/balloverlay/MainActivity.java << 'JEOF'
           package com.example.balloverlay;
           import android.content.Intent;
@@ -704,24 +741,33 @@ jobs:
           public class MainActivity extends AppCompatActivity {
               private static final int REQ_PERM=1001;
               @Override protected void onCreate(Bundle s){
-                  super.onCreate(s); setContentView(R.layout.activity_main);
+                  super.onCreate(s);setContentView(R.layout.activity_main);
                   findViewById(R.id.btnSummonBall).setOnClickListener(v->onSummon(0));
                   findViewById(R.id.btnSummonBox).setOnClickListener(v->onSummon(1));
-                  findViewById(R.id.btnSummonNail).setOnClickListener(v->onSummon(2));
+                  findViewById(R.id.btnSummonNail).setOnClickListener(v->onNail());
                   findViewById(R.id.btnDelete).setOnClickListener(v->onDeleteMode());
                   findViewById(R.id.btnClear).setOnClickListener(v->onClear());
               }
               private void onSummon(int mode){
                   if(!hasPerm()){requestPerm();return;}
                   startService(new Intent(this,OverlayService.class));
-                  Intent i=new Intent(this,SummonActivity.class); i.putExtra("mode",mode);
+                  Intent i=new Intent(this,SummonActivity.class);i.putExtra("mode",mode);
                   startActivity(i);
+              }
+              private void onNail(){
+                  if(!hasPerm()){requestPerm();return;}
+                  startService(new Intent(this,OverlayService.class));
+                  OverlayService svc=OverlayService.getInstance();
+                  if(svc!=null){
+                      svc.enterNailMode();
+                      moveTaskToBack(true); // 縮到後台讓釘子覆蓋層顯示
+                  }
               }
               private void onDeleteMode(){
                   OverlayService svc=OverlayService.getInstance();
                   if(svc==null){Toast.makeText(this,"尚未召喚任何物體",Toast.LENGTH_SHORT).show();return;}
-                  svc.deleteMode=!svc.deleteMode;
-                  Toast.makeText(this,svc.deleteMode?"點選要刪除的物體":"已取消刪除模式",Toast.LENGTH_SHORT).show();
+                  svc.interactMode=svc.interactMode==1?0:1;
+                  Toast.makeText(this,svc.interactMode==1?"點選要刪除的物體":"已取消刪除模式",Toast.LENGTH_SHORT).show();
               }
               private void onClear(){
                   OverlayService svc=OverlayService.getInstance();
@@ -748,30 +794,30 @@ jobs:
                   android:textSize="28sp" android:textStyle="bold" android:layout_marginBottom="8dp"/>
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
                   android:text="召喚的物體在手機的所有地方都生效"
-                  android:textColor="#90A4AE" android:textSize="13sp" android:layout_marginBottom="32dp"/>
+                  android:textColor="#90A4AE" android:textSize="13sp" android:layout_marginBottom="28dp"/>
               <Button android:id="@+id/btnSummonBall"
-                  android:layout_width="260dp" android:layout_height="56dp"
+                  android:layout_width="260dp" android:layout_height="54dp"
                   android:text="⚽ 召喚球" android:textSize="17sp" android:textColor="#FFFFFF"
-                  android:textStyle="bold" android:backgroundTint="#1565C0" android:layout_marginBottom="12dp"/>
+                  android:textStyle="bold" android:backgroundTint="#1565C0" android:layout_marginBottom="10dp"/>
               <Button android:id="@+id/btnSummonBox"
-                  android:layout_width="260dp" android:layout_height="56dp"
+                  android:layout_width="260dp" android:layout_height="54dp"
                   android:text="📦 召喚箱子" android:textSize="17sp" android:textColor="#FFFFFF"
-                  android:textStyle="bold" android:backgroundTint="#5D4037" android:layout_marginBottom="12dp"/>
+                  android:textStyle="bold" android:backgroundTint="#5D4037" android:layout_marginBottom="10dp"/>
               <Button android:id="@+id/btnSummonNail"
-                  android:layout_width="260dp" android:layout_height="56dp"
+                  android:layout_width="260dp" android:layout_height="54dp"
                   android:text="📌 召喚釘子" android:textSize="17sp" android:textColor="#FFFFFF"
-                  android:textStyle="bold" android:backgroundTint="#546E7A" android:layout_marginBottom="12dp"/>
+                  android:textStyle="bold" android:backgroundTint="#546E7A" android:layout_marginBottom="10dp"/>
               <Button android:id="@+id/btnDelete"
-                  android:layout_width="260dp" android:layout_height="56dp"
+                  android:layout_width="260dp" android:layout_height="54dp"
                   android:text="🎯 刪除指定物體" android:textSize="17sp" android:textColor="#FFFFFF"
-                  android:textStyle="bold" android:backgroundTint="#E65100" android:layout_marginBottom="12dp"/>
+                  android:textStyle="bold" android:backgroundTint="#E65100" android:layout_marginBottom="10dp"/>
               <Button android:id="@+id/btnClear"
-                  android:layout_width="260dp" android:layout_height="56dp"
+                  android:layout_width="260dp" android:layout_height="54dp"
                   android:text="🗑 刪除所有物體" android:textSize="17sp" android:textColor="#FFFFFF"
                   android:textStyle="bold" android:backgroundTint="#B71C1C"/>
               <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
                   android:text="按住物體可施力移動它" android:textColor="#546E7A"
-                  android:textSize="13sp" android:layout_marginTop="24dp"/>
+                  android:textSize="13sp" android:layout_marginTop="20dp"/>
           </LinearLayout>
           EOF
 
